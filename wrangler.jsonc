@@ -18,9 +18,13 @@
       "binding": "DB",
       "database_name": "ml",
       // Set by the owner after creating the D1 database "ml".
-      "database_id": "REPLACE_WITH_ML_DATABASE_ID"
+      "database_id": "153f0f3e-28d6-488a-8f86-c9b7aedb3aaf"
     }
   ],
+  // Login codes (2FA) go out through Cloudflare Email Service.
+  // The sending domain must be onboarded once by the owner (see README).
+  "send_email": [{ "name": "EMAIL" }],
+  "vars": { "MAIL_FROM": "no-reply@ml.tkb-pro.com" },
   "observability": { "enabled": true }
   // Secrets (set in Cloudflare, never in this file): SETUP_TOKEN
 }

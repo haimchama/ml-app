@@ -202,3 +202,11 @@ dialog::backdrop { background: rgba(15, 27, 61, 0.35); }
 #toast { position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%); background: var(--navy); color: var(--white); padding: 12px 22px; border-radius: 999px; opacity: 0; pointer-events: none; transition: opacity 0.2s; z-index: 10; }
 #toast.show { opacity: 1; }
 #toast.error { background: var(--danger); }
+.actions-inline { display: inline-flex; gap: 6px; flex: none; }
+.approval-banner { background: var(--gold-soft); border-color: #E8DFC9; }
+.approval-banner.rejected { background: var(--danger-soft); border-color: #F1D3C4; }
+.approval-banner h2 { font-size: 20px; }
+.lawyer-filter { min-height: 40px; border: 1px solid var(--field); border-radius: 999px; padding: 0 14px; background: var(--white); }
+.perm-yes { color: var(--ok); font-weight: 600; }
+.perm-no { color: #B0B4BF; }
+.code-input { font-size: 28px !important; letter-spacing: 10px; text-align: center; direction: ltr; }

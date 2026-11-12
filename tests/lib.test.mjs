@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import {
   str, email, date, time, oneOf, id, checkPassword, hashPassword, verifyPassword,
   timingSafeEqual, addDays, todayIL, PROCESSES, LEAD_STAGES, ValidationError,
+  can, permsOf, initialApproval, randomCode, maskEmail, codeEmail, ROLES, PERMISSIONS,
 } from '../src/lib.js';
 
 test('str trims, enforces required and max length', () => {
@@ -39,8 +40,11 @@ test('oneOf and id', () => {
 });
 
 test('password rules and hashing round trip', async () => {
-  assert.throws(() => checkPassword('short'), ValidationError);
-  assert.equal(checkPassword('a-long-password'), 'a-long-password');
+  assert.throws(() => checkPassword('short1'), ValidationError);
+  assert.throws(() => checkPassword('a-long-password'), ValidationError, 'needs a digit');
+  assert.throws(() => checkPassword('12345678901'), ValidationError, 'needs a letter');
+  assert.throws(() => checkPassword('aaaaaaaaa1'), ValidationError, 'too simple');
+  assert.equal(checkPassword('a-long-password-7'), 'a-long-password-7');
   const stored = await hashPassword('a-long-password', 1000);
   assert.match(stored, /^pbkdf2\$1000\$/);
   assert.equal(await verifyPassword('a-long-password', stored), true);
@@ -74,4 +78,33 @@ test('process templates are well formed', () => {
   }
   assert.ok(PROCESSES.general);
   assert.ok(LEAD_STAGES.some((s) => s.key === 'signed'));
+});
+
+test('roles and permissions', () => {
+  assert.deepEqual(Object.keys(ROLES).sort(), ['it', 'lawyer', 'secretary']);
+  for (const p of Object.keys(PERMISSIONS)) assert.equal(can('it', p), true, 'IT has ' + p);
+  assert.equal(can('lawyer', 'clients.approve'), true);
+  assert.equal(can('lawyer', 'users.manage'), false);
+  assert.equal(can('secretary', 'clients.approve'), false);
+  assert.equal(can('secretary', 'events.all'), true);
+  assert.equal(can('lawyer', 'events.all'), false);
+  assert.equal(can('nobody', 'audit.view'), false);
+  assert.equal(initialApproval('secretary'), 'pending');
+  assert.equal(initialApproval('lawyer'), 'approved');
+  assert.ok(permsOf('it').length > permsOf('lawyer').length);
+});
+
+test('one-time codes and masked e-mail', () => {
+  const seen = new Set();
+  for (let i = 0; i < 200; i++) {
+    const c = randomCode();
+    assert.match(c, /^\d{6}$/);
+    seen.add(c);
+  }
+  assert.ok(seen.size > 190, 'codes should not repeat much');
+  assert.equal(maskEmail('michael@example.co.il'), 'mi•••••@example.co.il');
+  assert.equal(maskEmail('ab@x.co'), 'a••@x.co');
+  const m = codeEmail('<script>', '123456', 10);
+  assert.ok(m.html.includes('123456') && !m.html.includes('<script>'));
+  assert.ok(m.text.includes('123456'));
 });

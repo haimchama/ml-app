@@ -8,9 +8,45 @@ export class ValidationError extends Error {
 }
 
 export const ROLES = {
-  admin: 'מנהל/ת',
+  it: 'IT – מנהל מערכת',
   lawyer: 'עורך/ת דין',
-  staff: 'מזכירות',
+  secretary: 'מזכירות',
+};
+
+// What each role may do. "it" has everything.
+export const PERMISSIONS = {
+  'users.manage': 'ניהול משתמשים',
+  'system.view': 'מצב המערכת וניתוק משתמשים',
+  'audit.view': 'צפייה ביומן הפעולות',
+  'clients.approve': 'אישור לקוחות',
+  'cases.close': 'סגירה ופתיחה מחדש של תיקים',
+  'events.all': 'ניהול היומן של כל עורכי הדין',
+  'office.supervise': 'פיקוח על משימות המשרד',
+};
+
+const ROLE_PERMS = {
+  it: Object.keys(PERMISSIONS),
+  lawyer: ['audit.view', 'clients.approve', 'cases.close', 'office.supervise'],
+  secretary: ['events.all'],
+};
+
+export function can(role, perm) {
+  return (ROLE_PERMS[role] || []).includes(perm);
+}
+
+export function permsOf(role) {
+  return [...(ROLE_PERMS[role] || [])];
+}
+
+// A client created by someone who may approve is approved at once.
+export function initialApproval(role) {
+  return can(role, 'clients.approve') ? 'approved' : 'pending';
+}
+
+export const APPROVAL = {
+  pending: 'ממתין לאישור עו"ד',
+  approved: 'מאושר',
+  rejected: 'לא אושר',
 };
 
 export const LEAD_STAGES = [
@@ -151,7 +187,40 @@ export function bool(value) {
 export function checkPassword(pw) {
   if (typeof pw !== 'string' || pw.length < 10) throw new ValidationError('הסיסמה צריכה להיות לפחות 10 תווים');
   if (pw.length > 200) throw new ValidationError('הסיסמה ארוכה מדי');
+  if (!/[^0-9]/.test(pw) || !/[0-9]/.test(pw)) throw new ValidationError('הסיסמה צריכה לכלול גם אותיות וגם ספרות');
+  if (new Set(pw).size < 5) throw new ValidationError('הסיסמה פשוטה מדי');
   return pw;
+}
+
+// 6-digit one-time code, uniform (rejection sampling, no modulo bias).
+export function randomCode() {
+  const a = new Uint32Array(1);
+  const limit = Math.floor(0x100000000 / 1000000) * 1000000;
+  do { crypto.getRandomValues(a); } while (a[0] >= limit);
+  return String(a[0] % 1000000).padStart(6, '0');
+}
+
+export function maskEmail(mail) {
+  const [user, domain] = String(mail).split('@');
+  if (!domain) return '';
+  const shown = user.length <= 2 ? user[0] : user.slice(0, 2);
+  return `${shown}${'•'.repeat(Math.max(2, user.length - shown.length))}@${domain}`;
+}
+
+export function codeEmail(name, code, minutes) {
+  const subject = `קוד הכניסה שלך: ${code}`;
+  const text = `שלום ${name},\n\nקוד הכניסה למערכת משרד עו"ד מיכאל ליטווק: ${code}\nהקוד בתוקף ${minutes} דקות.\n\nאם לא ניסית להתחבר, אל תמסור את הקוד לאיש ופנה מיד למנהל המערכת.`;
+  const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+  const html = `<!doctype html><html lang="he" dir="rtl"><body style="margin:0;background:#FAFAF8;font-family:Arial,sans-serif;color:#1A1F2E">
+<div style="max-width:480px;margin:32px auto;background:#fff;border:1px solid #EEEDE8;border-radius:18px;padding:32px;text-align:right">
+<div style="font-size:18px;font-weight:bold;color:#1E2F5C">משרד עו"ד מיכאל ליטווק</div>
+<div style="width:40px;height:1px;background:#B8995F;margin:12px 0 24px"></div>
+<p>שלום ${esc(name)},</p><p>קוד הכניסה שלך למערכת:</p>
+<div style="font-size:34px;letter-spacing:8px;font-weight:bold;color:#1E2F5C;background:#F6F4EE;border-radius:12px;padding:16px;text-align:center;direction:ltr">${esc(code)}</div>
+<p style="color:#5B6275;font-size:14px">הקוד בתוקף ${minutes} דקות.</p>
+<p style="color:#8A3A14;font-size:14px">אם לא ניסית להתחבר, אל תמסור את הקוד לאיש ופנה מיד למנהל המערכת.</p>
+</div></body></html>`;
+  return { subject, text, html };
 }
 
 // ---- crypto (Web Crypto: available in Workers and in Node 20+) ----

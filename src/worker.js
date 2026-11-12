@@ -1,8 +1,10 @@
-import { migrate } from './db.js';
+import { migrate, MIGRATIONS } from './db.js';
 import {
-  ValidationError, ROLES, LEAD_STAGES, EVENT_KINDS, PROCESSES,
+  ValidationError, ROLES, PERMISSIONS, APPROVAL, LEAD_STAGES, EVENT_KINDS, PROCESSES,
+  can, permsOf, initialApproval,
   str, email, date, time, oneOf, id, bool, checkPassword,
-  hashPassword, verifyPassword, randomToken, sha256, timingSafeEqual, addDays, todayIL,
+  hashPassword, verifyPassword, randomToken, randomCode, sha256, timingSafeEqual,
+  maskEmail, codeEmail, addDays, todayIL,
 } from './lib.js';
 
 const COOKIE = 'ml_session';
@@ -10,6 +12,11 @@ const SESSION_HOURS = 12;
 const MAX_BODY = 32 * 1024;
 const LOGIN_MAX_FAILURES = 5;
 const LOGIN_WINDOW_MIN = 15;
+const CODE_MINUTES = 10;
+const CODE_MAX_ATTEMPTS = 5;
+const CODE_MAX_SENDS = 3;
+const RESEND_SECONDS = 30;
+const DEFAULT_MAIL_FROM = 'no-reply@ml.tkb-pro.com';
 
 const SECURITY_HEADERS = {
   'Cache-Control': 'no-store',
@@ -97,8 +104,8 @@ function audit(env, user, action, entity, entityId, detail = '') {
     .bind(user ? user.id : null, action, entity, entityId ?? null, String(detail).slice(0, 300)).run();
 }
 
-function requireAdmin(user) {
-  if (user.role !== 'admin') throw new HttpError(403, 'פעולה למנהלים בלבד');
+function requirePerm(user, perm) {
+  if (!can(user.role, perm)) throw new HttpError(403, 'אין לך הרשאה לפעולה הזאת');
 }
 
 async function userExists(env, userId) {
@@ -116,6 +123,35 @@ async function startSession(env, userId) {
   return sessionCookie(token, SESSION_HOURS * 3600);
 }
 
+function mailConfigured(env) {
+  return Boolean(env.EMAIL && typeof env.EMAIL.send === 'function');
+}
+
+async function sendCode(env, url, user, code) {
+  const msg = codeEmail(user.name, code, CODE_MINUTES);
+  // Local development only (.dev.vars). Never set DEV_MAIL_LOG in Cloudflare.
+  if (env.DEV_MAIL_LOG === '1') {
+    console.log(`[dev] login code for ${user.email}: ${code}`);
+    return;
+  }
+  if (mailConfigured(env)) {
+    try {
+      await env.EMAIL.send({
+        to: user.email,
+        from: { email: env.MAIL_FROM || DEFAULT_MAIL_FROM, name: 'משרד עו"ד מיכאל ליטווק' },
+        subject: msg.subject,
+        text: msg.text,
+        html: msg.html,
+      });
+      return;
+    } catch (e) {
+      console.error('mail send failed', e && e.code, e && e.message);
+      throw new HttpError(502, 'שליחת קוד האימות נכשלה. נסו שוב בעוד רגע.');
+    }
+  }
+  throw new HttpError(503, 'שליחת מיילים עוד לא הוגדרה בשרת, ולכן אי אפשר להשלים כניסה. פנו לתמיכה.');
+}
+
 // ---------- router ----------
 
 async function route(request, env, url) {
@@ -127,17 +163,19 @@ async function route(request, env, url) {
   // public endpoints
   if (res === 'setup' && method === 'GET') return setupNeeded(env);
   if (res === 'setup' && method === 'POST') return setup(request, env);
-  if (res === 'login' && method === 'POST') return login(request, env);
+  if (res === 'login' && method === 'POST' && !rid) return login(request, env, url);
+  if (res === 'login' && method === 'POST' && rid === 'verify') return verifyCode(request, env);
+  if (res === 'login' && method === 'POST' && rid === 'resend') return resendCode(request, env, url);
   if (res === 'logout' && method === 'POST') return logout(request, env);
 
   const user = await currentUser(request, env);
   if (!user) throw new HttpError(401, 'יש להתחבר');
 
-  if (res === 'me' && method === 'GET') return json({ user, roles: ROLES });
-  if (res === 'me' && sub === undefined && rid === 'password' && method === 'POST') return changePassword(request, env, user);
+  if (res === 'me' && method === 'GET' && !rid) return json({ user: { ...user, perms: permsOf(user.role) } });
+  if (res === 'me' && rid === 'password' && method === 'POST') return changePassword(request, env, user);
   if (user.must_change) throw new HttpError(403, 'יש להחליף סיסמה לפני המשך העבודה');
 
-  if (res === 'meta' && method === 'GET') return meta(env);
+  if (res === 'meta' && method === 'GET') return meta(env, user);
   if (res === 'dashboard' && method === 'GET') return dashboard(env, user);
 
   if (res === 'users') {
@@ -150,9 +188,10 @@ async function route(request, env, url) {
     if (method === 'POST' && !rid) return createClient(request, env, user);
     if (method === 'GET' && rid) return getClient(env, id(rid, 'לקוח'));
     if (method === 'PATCH' && rid) return updateClient(request, env, user, id(rid, 'לקוח'));
+    if (method === 'POST' && rid && sub === 'approval') return decideClient(request, env, user, id(rid, 'לקוח'));
   }
   if (res === 'cases') {
-    if (method === 'GET' && !rid) return listCases(env, url);
+    if (method === 'GET' && !rid) return listCases(env, url, user);
     if (method === 'POST' && !rid) return createCase(request, env, user);
     if (method === 'GET' && rid && !sub) return getCase(env, id(rid, 'תיק'));
     if (method === 'PATCH' && rid && !sub) return updateCase(request, env, user, id(rid, 'תיק'));
@@ -166,12 +205,14 @@ async function route(request, env, url) {
     if (method === 'DELETE' && rid) return deleteTask(env, user, id(rid, 'משימה'));
   }
   if (res === 'events') {
-    if (method === 'GET' && !rid) return listEvents(env, url);
+    if (method === 'GET' && !rid) return listEvents(env, url, user);
     if (method === 'POST' && !rid) return createEvent(request, env, user);
     if (method === 'PATCH' && rid) return updateEvent(request, env, user, id(rid, 'אירוע'));
     if (method === 'DELETE' && rid) return deleteEvent(env, user, id(rid, 'אירוע'));
   }
   if (res === 'audit' && method === 'GET') return listAudit(env, user);
+  if (res === 'system' && method === 'GET') return systemStatus(env, user);
+  if (res === 'system' && rid === 'revoke' && method === 'POST') return revokeSessions(request, env, user);
 
   throw new HttpError(404, 'לא נמצא');
 }
@@ -192,32 +233,101 @@ async function setup(request, env) {
   const name = str(data.name, 'שם', { required: true, max: 80 });
   const mail = email(data.email, 'אימייל', { required: true });
   const pass = await hashPassword(checkPassword(data.password));
-  const r = await env.DB.prepare(`INSERT INTO users (email, name, role, pass) VALUES (?, ?, 'admin', ?)`)
+  const r = await env.DB.prepare(`INSERT INTO users (email, name, role, pass) VALUES (?, ?, 'it', ?)`)
     .bind(mail, name, pass).run();
   const userId = r.meta.last_row_id;
   await audit(env, { id: userId }, 'setup', 'user', userId);
-  return json({ ok: true }, 200, { 'Set-Cookie': await startSession(env, userId) });
+  // No session here: the first login goes through the e-mail code like every other.
+  return json({ ok: true });
 }
 
-async function login(request, env) {
-  const data = await body(request);
-  const mail = email(data.email, 'אימייל', { required: true });
-  const password = str(data.password, 'סיסמה', { required: true, max: 200 });
+async function tooManyFailures(env, mail) {
   const fails = await env.DB.prepare(
     `SELECT COUNT(*) AS n FROM login_failures WHERE email = ? AND at > datetime('now', ?)`
   ).bind(mail, `-${LOGIN_WINDOW_MIN} minutes`).first();
-  if (fails.n >= LOGIN_MAX_FAILURES) {
-    throw new HttpError(429, `יותר מדי ניסיונות. נסו שוב בעוד ${LOGIN_WINDOW_MIN} דקות.`);
-  }
-  const user = await env.DB.prepare('SELECT id, pass FROM users WHERE email = ? AND active = 1').bind(mail).first();
+  return fails.n >= LOGIN_MAX_FAILURES;
+}
+
+function lockedError() {
+  return new HttpError(429, `יותר מדי ניסיונות. נסו שוב בעוד ${LOGIN_WINDOW_MIN} דקות.`);
+}
+
+// Step 1: e-mail + password. On success a code goes to the user's e-mail; no session yet.
+async function login(request, env, url) {
+  const data = await body(request);
+  const mail = email(data.email, 'אימייל', { required: true });
+  const password = str(data.password, 'סיסמה', { required: true, max: 200 });
+  if (await tooManyFailures(env, mail)) throw lockedError();
+  const user = await env.DB.prepare('SELECT id, name, email, pass FROM users WHERE email = ? AND active = 1').bind(mail).first();
   const ok = user ? await verifyPassword(password, user.pass) : false;
   if (!ok) {
     await env.DB.prepare('INSERT INTO login_failures (email) VALUES (?)').bind(mail).run();
     throw new HttpError(401, 'אימייל או סיסמה שגויים');
   }
-  await env.DB.prepare('DELETE FROM login_failures WHERE email = ?').bind(mail).run();
-  await audit(env, user, 'login', 'user', user.id);
-  return json({ ok: true }, 200, { 'Set-Cookie': await startSession(env, user.id) });
+  const challenge = randomToken();
+  const code = randomCode();
+  const challengeHash = await sha256(challenge);
+  await env.DB.batch([
+    env.DB.prepare(`DELETE FROM login_challenges WHERE user_id = ? OR expires_at < datetime('now')`).bind(user.id),
+    env.DB.prepare(`INSERT INTO login_challenges (token_hash, user_id, code_hash, expires_at) VALUES (?, ?, ?, datetime('now', ?))`)
+      .bind(challengeHash, user.id, await sha256(challengeHash + ':' + code), `+${CODE_MINUTES} minutes`),
+  ]);
+  await sendCode(env, url, user, code);
+  return json({ challenge, email: maskEmail(user.email), minutes: CODE_MINUTES });
+}
+
+async function loadChallenge(env, challenge) {
+  const token = str(challenge, 'אתגר', { required: true, max: 100 });
+  const hash = await sha256(token);
+  const ch = await env.DB.prepare(
+    `SELECT c.*, u.email, u.name FROM login_challenges c JOIN users u ON u.id = c.user_id
+     WHERE c.token_hash = ? AND c.expires_at > datetime('now') AND u.active = 1`
+  ).bind(hash).first();
+  if (!ch) throw new HttpError(401, 'פג תוקף הקוד. התחברו מחדש.');
+  return ch;
+}
+
+// Step 2: the 6-digit code from the e-mail.
+async function verifyCode(request, env) {
+  const data = await body(request);
+  const ch = await loadChallenge(env, data.challenge);
+  const code = str(data.code, 'קוד', { required: true, max: 10 }).replace(/\s/g, '');
+  if (await tooManyFailures(env, ch.email)) throw lockedError();
+  if (ch.attempts >= CODE_MAX_ATTEMPTS) {
+    await env.DB.prepare('DELETE FROM login_challenges WHERE token_hash = ?').bind(ch.token_hash).run();
+    throw new HttpError(401, 'יותר מדי ניסיונות קוד. התחברו מחדש.');
+  }
+  const ok = /^\d{6}$/.test(code) && timingSafeEqual(await sha256(ch.token_hash + ':' + code), ch.code_hash);
+  if (!ok) {
+    await env.DB.batch([
+      env.DB.prepare('UPDATE login_challenges SET attempts = attempts + 1 WHERE token_hash = ?').bind(ch.token_hash),
+      env.DB.prepare('INSERT INTO login_failures (email) VALUES (?)').bind(ch.email),
+    ]);
+    throw new HttpError(401, 'הקוד שגוי');
+  }
+  await env.DB.batch([
+    env.DB.prepare('DELETE FROM login_challenges WHERE token_hash = ?').bind(ch.token_hash),
+    env.DB.prepare('DELETE FROM login_failures WHERE email = ?').bind(ch.email),
+  ]);
+  await audit(env, { id: ch.user_id }, 'login', 'user', ch.user_id);
+  return json({ ok: true }, 200, { 'Set-Cookie': await startSession(env, ch.user_id) });
+}
+
+async function resendCode(request, env, url) {
+  const data = await body(request);
+  const ch = await loadChallenge(env, data.challenge);
+  if (ch.sends >= CODE_MAX_SENDS) throw new HttpError(429, 'נשלחו כבר מספיק קודים. התחברו מחדש.');
+  const recent = await env.DB.prepare(
+    `SELECT 1 AS r FROM login_challenges WHERE token_hash = ? AND last_sent_at > datetime('now', ?)`
+  ).bind(ch.token_hash, `-${RESEND_SECONDS} seconds`).first();
+  if (recent) throw new HttpError(429, `אפשר לבקש קוד חדש אחרי ${RESEND_SECONDS} שניות.`);
+  const code = randomCode();
+  await env.DB.prepare(
+    `UPDATE login_challenges SET code_hash = ?, attempts = 0, sends = sends + 1, last_sent_at = datetime('now'),
+     expires_at = datetime('now', ?) WHERE token_hash = ?`
+  ).bind(await sha256(ch.token_hash + ':' + code), `+${CODE_MINUTES} minutes`, ch.token_hash).run();
+  await sendCode(env, url, { name: ch.name, email: ch.email }, code);
+  return json({ ok: true });
 }
 
 async function logout(request, env) {
@@ -241,26 +351,40 @@ async function changePassword(request, env, user) {
   return json({ ok: true }, 200, { 'Set-Cookie': await startSession(env, user.id) });
 }
 
-// ---------- users ----------
+// ---------- meta & users ----------
 
-async function meta(env) {
+async function meta(env, user) {
   const { results } = await env.DB.prepare('SELECT id, name, role FROM users WHERE active = 1 ORDER BY name').all();
   const processes = Object.fromEntries(
     Object.entries(PROCESSES).map(([k, p]) => [k, { label: p.label, area: p.area, steps: p.steps.map((s) => s.label) }])
   );
-  return json({ users: results, roles: ROLES, leadStages: LEAD_STAGES, eventKinds: EVENT_KINDS, processes, today: todayIL() });
+  return json({
+    users: results,
+    roles: ROLES,
+    permissions: PERMISSIONS,
+    rolePerms: Object.fromEntries(Object.keys(ROLES).map((r) => [r, permsOf(r)])),
+    approval: APPROVAL,
+    leadStages: LEAD_STAGES,
+    eventKinds: EVENT_KINDS,
+    processes,
+    today: todayIL(),
+    perms: permsOf(user.role),
+  });
 }
 
 async function listUsers(env, user) {
-  requireAdmin(user);
+  requirePerm(user, 'users.manage');
   const { results } = await env.DB.prepare(
-    'SELECT id, email, name, role, active, must_change, created_at FROM users ORDER BY active DESC, name'
+    `SELECT u.id, u.email, u.name, u.role, u.active, u.must_change, u.created_at,
+            (SELECT MAX(at) FROM audit a WHERE a.user_id = u.id AND a.action = 'login') AS last_login,
+            (SELECT COUNT(*) FROM sessions s WHERE s.user_id = u.id AND s.expires_at > datetime('now')) AS sessions
+     FROM users u ORDER BY u.active DESC, u.name`
   ).all();
   return json({ users: results });
 }
 
 async function createUser(request, env, user) {
-  requireAdmin(user);
+  requirePerm(user, 'users.manage');
   const data = await body(request);
   const name = str(data.name, 'שם', { required: true, max: 80 });
   const mail = email(data.email, 'אימייל', { required: true });
@@ -270,12 +394,12 @@ async function createUser(request, env, user) {
   if (exists) throw new ValidationError('כבר קיים משתמש עם האימייל הזה');
   const r = await env.DB.prepare('INSERT INTO users (email, name, role, pass, must_change) VALUES (?, ?, ?, ?, 1)')
     .bind(mail, name, role, pass).run();
-  await audit(env, user, 'create', 'user', r.meta.last_row_id, mail);
+  await audit(env, user, 'create', 'user', r.meta.last_row_id, `${mail} ${role}`);
   return json({ id: r.meta.last_row_id });
 }
 
 async function updateUser(request, env, user, userId) {
-  requireAdmin(user);
+  requirePerm(user, 'users.manage');
   const data = await body(request);
   const target = await env.DB.prepare('SELECT id, role, active FROM users WHERE id = ?').bind(userId).first();
   if (!target) throw new HttpError(404, 'משתמש לא נמצא');
@@ -284,16 +408,18 @@ async function updateUser(request, env, user, userId) {
   if (data.name !== undefined) { sets.push('name = ?'); vals.push(str(data.name, 'שם', { required: true, max: 80 })); }
   if (data.role !== undefined) { sets.push('role = ?'); vals.push(oneOf(data.role, 'תפקיד', Object.keys(ROLES))); }
   if (data.active !== undefined) { sets.push('active = ?'); vals.push(bool(data.active) ? 1 : 0); }
-  if (data.password !== undefined) {
+  if (data.password !== undefined && data.password !== '') {
     sets.push('pass = ?', 'must_change = 1');
     vals.push(await hashPassword(checkPassword(data.password)));
   }
   if (!sets.length) throw new ValidationError('אין מה לעדכן');
-  if (userId === user.id && (data.active !== undefined && !bool(data.active) || (data.role !== undefined && data.role !== 'admin'))) {
-    throw new ValidationError('אי אפשר להסיר הרשאת מנהל או להשבית את עצמך');
+  const deactivating = data.active !== undefined && !bool(data.active);
+  if (userId === user.id && (deactivating || (data.role !== undefined && data.role !== 'it'))) {
+    throw new ValidationError('אי אפשר להסיר הרשאת IT או להשבית את עצמך');
   }
   const stmts = [env.DB.prepare(`UPDATE users SET ${sets.join(', ')} WHERE id = ?`).bind(...vals, userId)];
-  if (data.active !== undefined && !bool(data.active) || data.password !== undefined) {
+  const roleChanged = data.role !== undefined && data.role !== target.role;
+  if (deactivating || (data.password !== undefined && data.password !== '') || roleChanged) {
     stmts.push(env.DB.prepare('DELETE FROM sessions WHERE user_id = ?').bind(userId));
   }
   await env.DB.batch(stmts);
@@ -306,37 +432,65 @@ async function updateUser(request, env, user, userId) {
 async function dashboard(env, user) {
   const today = todayIL();
   const week = addDays(today, 7);
-  const [counts, events, pipeline, cases, myTasks] = await env.DB.batch([
+  const isLawyer = user.role === 'lawyer';
+  const supervise = can(user.role, 'office.supervise');
+  const approve = can(user.role, 'clients.approve');
+  // A lawyer sees his own calendar and cases; the office (secretary, IT) sees everyone's.
+  const evFilter = isLawyer ? 'AND e.lawyer_id = ?3' : '';
+  const caseFilter = isLawyer ? 'AND c.owner_id = ?1' : '';
+  const queries = [
     env.DB.prepare(
-      `SELECT (SELECT COUNT(*) FROM cases WHERE status = 'open') AS open_cases,
-              (SELECT COUNT(*) FROM events WHERE date >= ?1 AND date <= ?2) AS week_events,
+      `SELECT (SELECT COUNT(*) FROM cases WHERE status = 'open' ${isLawyer ? 'AND owner_id = ?3' : ''}) AS open_cases,
+              (SELECT COUNT(*) FROM events e WHERE e.date >= ?1 AND e.date <= ?2 ${evFilter}) AS week_events,
+              (SELECT COUNT(*) FROM events e WHERE e.date = ?1 ${evFilter}) AS today_events,
               (SELECT COUNT(*) FROM tasks WHERE done = 0 AND assignee_id = ?3) AS my_open_tasks,
               (SELECT COUNT(*) FROM tasks WHERE done = 0 AND due_date IS NOT NULL AND due_date < ?1) AS overdue_tasks,
+              (SELECT COUNT(*) FROM clients WHERE approval = 'pending') AS pending_approvals,
               (SELECT COUNT(*) FROM clients WHERE kind = 'lead' AND stage = 'new') AS new_leads`
     ).bind(today, week, user.id),
     env.DB.prepare(
-      `SELECT e.id, e.title, e.kind, e.date, e.time, e.case_id, c.title AS case_title, cl.name AS client_name
+      `SELECT e.id, e.title, e.kind, e.date, e.time, e.location, e.case_id, e.lawyer_id, l.name AS lawyer_name,
+              c.title AS case_title, cl.name AS client_name
        FROM events e LEFT JOIN cases c ON c.id = e.case_id LEFT JOIN clients cl ON cl.id = c.client_id
-       WHERE e.date >= ? ORDER BY e.date, e.time LIMIT 6`
-    ).bind(today),
+       LEFT JOIN users l ON l.id = e.lawyer_id
+       WHERE e.date >= ?1 ${evFilter.replace('?3', '?2')} ORDER BY e.date, e.time LIMIT 8`
+    ).bind(today, ...(isLawyer ? [user.id] : [])),
     env.DB.prepare(`SELECT stage, COUNT(*) AS n FROM clients WHERE kind = 'lead' GROUP BY stage`),
     env.DB.prepare(
-      `SELECT c.id, c.title, c.process, c.step, cl.name AS client_name, u.name AS owner_name
+      `SELECT c.id, c.title, c.process, c.step, c.status, cl.name AS client_name, u.name AS owner_name
        FROM cases c JOIN clients cl ON cl.id = c.client_id LEFT JOIN users u ON u.id = c.owner_id
-       WHERE c.status = 'open' ORDER BY c.updated_at DESC LIMIT 8`
-    ),
+       WHERE c.status = 'open' ${caseFilter} ORDER BY c.updated_at DESC LIMIT 8`
+    ).bind(...(isLawyer ? [user.id] : [])),
     env.DB.prepare(
-      `SELECT t.id, t.title, t.due_date, t.case_id, c.title AS case_title FROM tasks t LEFT JOIN cases c ON c.id = t.case_id
-       WHERE t.done = 0 AND t.assignee_id = ? ORDER BY t.due_date IS NULL, t.due_date LIMIT 8`
+      `SELECT t.id, t.title, t.due_date, t.done, t.case_id, c.title AS case_title, cl.name AS client_name, cr.name AS created_by_name
+       FROM tasks t LEFT JOIN cases c ON c.id = t.case_id LEFT JOIN clients cl ON cl.id = c.client_id
+       LEFT JOIN users cr ON cr.id = t.created_by
+       WHERE t.done = 0 AND t.assignee_id = ? ORDER BY t.due_date IS NULL, t.due_date LIMIT 10`
     ).bind(user.id),
-  ]);
+    env.DB.prepare(
+      `SELECT cl.id, cl.name, cl.kind, cl.stage, cl.phone, cl.source, cl.created_at, cr.name AS created_by_name
+       FROM clients cl LEFT JOIN users cr ON cr.id = cl.created_by WHERE cl.approval = 'pending' ORDER BY cl.created_at LIMIT 10`
+    ),
+  ];
+  if (supervise) {
+    queries.push(env.DB.prepare(
+      `SELECT t.id, t.title, t.due_date, t.done, t.case_id, c.title AS case_title, cl.name AS client_name, u.name AS assignee_name
+       FROM tasks t LEFT JOIN cases c ON c.id = t.case_id LEFT JOIN clients cl ON cl.id = c.client_id
+       LEFT JOIN users u ON u.id = t.assignee_id
+       WHERE t.done = 0 AND t.due_date IS NOT NULL AND t.due_date < ? ORDER BY t.due_date LIMIT 10`
+    ).bind(today));
+  }
+  const [counts, events, pipeline, cases, myTasks, pending, overdue] = await env.DB.batch(queries);
   return json({
     today,
+    role: user.role,
     counts: counts.results[0],
     events: events.results,
     pipeline: pipeline.results,
     cases: cases.results,
     myTasks: myTasks.results,
+    pending: approve || user.role === 'secretary' ? pending.results : [],
+    overdue: overdue ? overdue.results : null,
   });
 }
 
@@ -361,13 +515,15 @@ function clientFields(data, partial) {
 
 async function listClients(env, url) {
   const kind = url.searchParams.get('kind');
+  const approval = url.searchParams.get('approval');
   const q = (url.searchParams.get('q') || '').trim().slice(0, 60);
   const where = [];
   const vals = [];
   if (kind === 'lead' || kind === 'client') { where.push('cl.kind = ?'); vals.push(kind); }
+  if (approval && APPROVAL[approval]) { where.push('cl.approval = ?'); vals.push(approval); }
   if (q) { where.push('(cl.name LIKE ? OR cl.phone LIKE ? OR cl.email LIKE ? OR cl.id_number LIKE ?)'); vals.push(...Array(4).fill(`%${q}%`)); }
   const { results } = await env.DB.prepare(
-    `SELECT cl.id, cl.kind, cl.stage, cl.name, cl.phone, cl.email, cl.source, cl.updated_at, u.name AS owner_name,
+    `SELECT cl.id, cl.kind, cl.stage, cl.approval, cl.name, cl.phone, cl.email, cl.source, cl.updated_at, u.name AS owner_name,
             (SELECT COUNT(*) FROM cases c WHERE c.client_id = cl.id AND c.status = 'open') AS open_cases
      FROM clients cl LEFT JOIN users u ON u.id = cl.owner_id
      ${where.length ? 'WHERE ' + where.join(' AND ') : ''} ORDER BY cl.updated_at DESC LIMIT 300`
@@ -378,42 +534,61 @@ async function listClients(env, url) {
 async function createClient(request, env, user) {
   const f = clientFields(await body(request), false);
   await userExists(env, f.owner_id);
+  const approval = initialApproval(user.role);
+  if (approval !== 'approved' && f.kind === 'client') f.kind = 'lead';
+  if (approval !== 'approved' && f.stage === 'signed') f.stage = 'offer';
   const r = await env.DB.prepare(
-    `INSERT INTO clients (kind, stage, name, id_number, phone, email, address, source, notes, owner_id)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
-  ).bind(f.kind, f.stage, f.name, f.id_number, f.phone, f.email, f.address, f.source, f.notes, f.owner_id).run();
+    `INSERT INTO clients (kind, stage, name, id_number, phone, email, address, source, notes, owner_id, approval, approved_by, approved_at, created_by)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ${approval === 'approved' ? "datetime('now')" : 'NULL'}, ?)`
+  ).bind(f.kind, f.stage, f.name, f.id_number, f.phone, f.email, f.address, f.source, f.notes, f.owner_id,
+    approval, approval === 'approved' ? user.id : null, user.id).run();
   await audit(env, user, 'create', 'client', r.meta.last_row_id);
-  return json({ id: r.meta.last_row_id });
+  return json({ id: r.meta.last_row_id, approval });
 }
 
 async function getClient(env, clientId) {
-  const [client, cases, notes] = await env.DB.batch([
+  const [client, cases] = await env.DB.batch([
     env.DB.prepare(
-      `SELECT cl.*, u.name AS owner_name FROM clients cl LEFT JOIN users u ON u.id = cl.owner_id WHERE cl.id = ?`
+      `SELECT cl.*, u.name AS owner_name, a.name AS approved_by_name, cr.name AS created_by_name
+       FROM clients cl LEFT JOIN users u ON u.id = cl.owner_id LEFT JOIN users a ON a.id = cl.approved_by
+       LEFT JOIN users cr ON cr.id = cl.created_by WHERE cl.id = ?`
     ).bind(clientId),
     env.DB.prepare(
       `SELECT c.id, c.title, c.process, c.step, c.status, c.case_number, u.name AS owner_name
        FROM cases c LEFT JOIN users u ON u.id = c.owner_id WHERE c.client_id = ? ORDER BY c.status = 'closed', c.updated_at DESC`
     ).bind(clientId),
-    env.DB.prepare(
-      `SELECT n.id, n.text, n.created_at, u.name AS user_name FROM notes n LEFT JOIN users u ON u.id = n.user_id
-       WHERE n.client_id = ? ORDER BY n.created_at DESC LIMIT 50`
-    ).bind(clientId),
   ]);
   if (!client.results[0]) throw new HttpError(404, 'לקוח לא נמצא');
-  return json({ client: client.results[0], cases: cases.results, notes: notes.results });
+  return json({ client: client.results[0], cases: cases.results });
 }
 
 async function updateClient(request, env, user, clientId) {
   const f = clientFields(await body(request), true);
+  const current = await env.DB.prepare('SELECT approval FROM clients WHERE id = ?').bind(clientId).first();
+  if (!current) throw new HttpError(404, 'לקוח לא נמצא');
+  // Becoming a client needs a lawyer's approval first.
+  if (current.approval !== 'approved' && (f.kind === 'client' || f.stage === 'signed')) {
+    throw new ValidationError('לפני שליד הופך ללקוח צריך אישור של עורך דין');
+  }
   const keys = Object.keys(f);
   if (!keys.length) throw new ValidationError('אין מה לעדכן');
   if (f.owner_id !== undefined) await userExists(env, f.owner_id);
-  const r = await env.DB.prepare(
+  await env.DB.prepare(
     `UPDATE clients SET ${keys.map((k) => `${k} = ?`).join(', ')}, updated_at = datetime('now') WHERE id = ?`
   ).bind(...keys.map((k) => f[k]), clientId).run();
-  if (!r.meta.changes) throw new HttpError(404, 'לקוח לא נמצא');
   await audit(env, user, 'update', 'client', clientId, keys.join(','));
+  return json({ ok: true });
+}
+
+async function decideClient(request, env, user, clientId) {
+  requirePerm(user, 'clients.approve');
+  const data = await body(request);
+  const decision = oneOf(data.decision, 'החלטה', ['approved', 'rejected']);
+  const r = await env.DB.prepare(
+    `UPDATE clients SET approval = ?, approved_by = ?, approved_at = datetime('now'), updated_at = datetime('now') WHERE id = ?`
+  ).bind(decision, user.id, clientId).run();
+  if (!r.meta.changes) throw new HttpError(404, 'לקוח לא נמצא');
+  await audit(env, user, decision === 'approved' ? 'approve' : 'reject', 'client', clientId);
   return json({ ok: true });
 }
 
@@ -443,12 +618,14 @@ async function stepTasksStatements(env, user, caseId, processKey, step, ownerId)
   ).bind(caseId, step, t, ownerId, user.id));
 }
 
-async function listCases(env, url) {
+async function listCases(env, url, user) {
   const status = url.searchParams.get('status') || 'open';
   const q = (url.searchParams.get('q') || '').trim().slice(0, 60);
+  const mine = url.searchParams.get('mine') === '1';
   const where = [];
   const vals = [];
   if (status === 'open' || status === 'closed') { where.push('c.status = ?'); vals.push(status); }
+  if (mine) { where.push('c.owner_id = ?'); vals.push(user.id); }
   if (q) { where.push('(c.title LIKE ? OR c.case_number LIKE ? OR cl.name LIKE ? OR c.opposing_party LIKE ?)'); vals.push(...Array(4).fill(`%${q}%`)); }
   const { results } = await env.DB.prepare(
     `SELECT c.id, c.title, c.process, c.step, c.status, c.case_number, c.opened_at, cl.id AS client_id, cl.name AS client_name,
@@ -465,8 +642,9 @@ async function createCase(request, env, user) {
   const clientId = id(data.client_id, 'לקוח');
   const process = oneOf(data.process ?? 'general', 'סוג תהליך', Object.keys(PROCESSES));
   const opened = date(data.opened_at, 'תאריך פתיחה') || todayIL();
-  const client = await env.DB.prepare('SELECT id, kind FROM clients WHERE id = ?').bind(clientId).first();
+  const client = await env.DB.prepare('SELECT id, kind, approval FROM clients WHERE id = ?').bind(clientId).first();
   if (!client) throw new ValidationError('לקוח לא נמצא');
+  if (client.approval !== 'approved') throw new ValidationError('אפשר לפתוח תיק רק ללקוח שעורך דין אישר');
   await userExists(env, f.owner_id);
   const r = await env.DB.prepare(
     `INSERT INTO cases (client_id, title, process, case_number, court, opposing_party, fee_type, fee_amount, notes, owner_id, opened_at)
@@ -492,7 +670,10 @@ async function getCase(env, caseId) {
       `SELECT t.id, t.title, t.due_date, t.done, t.step, t.assignee_id, u.name AS assignee_name
        FROM tasks t LEFT JOIN users u ON u.id = t.assignee_id WHERE t.case_id = ? ORDER BY t.done, t.due_date IS NULL, t.due_date, t.id`
     ).bind(caseId),
-    env.DB.prepare('SELECT id, kind, title, date, time, location, notes FROM events WHERE case_id = ? ORDER BY date, time').bind(caseId),
+    env.DB.prepare(
+      `SELECT e.id, e.kind, e.title, e.date, e.time, e.location, e.notes, e.lawyer_id, l.name AS lawyer_name
+       FROM events e LEFT JOIN users l ON l.id = e.lawyer_id WHERE e.case_id = ? ORDER BY e.date, e.time`
+    ).bind(caseId),
     env.DB.prepare(
       `SELECT n.id, n.text, n.created_at, u.name AS user_name FROM notes n LEFT JOIN users u ON u.id = n.user_id
        WHERE n.case_id = ? ORDER BY n.created_at DESC LIMIT 100`
@@ -512,6 +693,7 @@ async function getCase(env, caseId) {
 
 async function updateCase(request, env, user, caseId) {
   const f = caseFields(await body(request), true);
+  if (f.status !== undefined) requirePerm(user, 'cases.close');
   const keys = Object.keys(f);
   if (!keys.length) throw new ValidationError('אין מה לעדכן');
   if (f.owner_id !== undefined) await userExists(env, f.owner_id);
@@ -519,7 +701,7 @@ async function updateCase(request, env, user, caseId) {
     `UPDATE cases SET ${keys.map((k) => `${k} = ?`).join(', ')}, updated_at = datetime('now') WHERE id = ?`
   ).bind(...keys.map((k) => f[k]), caseId).run();
   if (!r.meta.changes) throw new HttpError(404, 'תיק לא נמצא');
-  await audit(env, user, 'update', 'case', caseId, keys.join(','));
+  await audit(env, user, f.status ? (f.status === 'closed' ? 'close' : 'reopen') : 'update', 'case', caseId, keys.join(','));
   return json({ ok: true });
 }
 
@@ -558,10 +740,12 @@ async function listTasks(env, url, user) {
   const where = ['t.done = ?'];
   const vals = [done];
   if (scope === 'mine') { where.push('t.assignee_id = ?'); vals.push(user.id); }
+  if (scope === 'overdue') { where.push('t.due_date IS NOT NULL AND t.due_date < ?'); vals.push(todayIL()); }
   const { results } = await env.DB.prepare(
-    `SELECT t.id, t.title, t.due_date, t.done, t.case_id, c.title AS case_title, cl.name AS client_name, u.name AS assignee_name
+    `SELECT t.id, t.title, t.due_date, t.done, t.case_id, t.assignee_id, c.title AS case_title, cl.name AS client_name,
+            u.name AS assignee_name, cr.name AS created_by_name
      FROM tasks t LEFT JOIN cases c ON c.id = t.case_id LEFT JOIN clients cl ON cl.id = c.client_id
-     LEFT JOIN users u ON u.id = t.assignee_id
+     LEFT JOIN users u ON u.id = t.assignee_id LEFT JOIN users cr ON cr.id = t.created_by
      WHERE ${where.join(' AND ')} ORDER BY t.due_date IS NULL, t.due_date, t.id DESC LIMIT 300`
   ).bind(...vals).all();
   return json({ tasks: results, today: todayIL() });
@@ -607,7 +791,7 @@ async function deleteTask(env, user, taskId) {
   return json({ ok: true });
 }
 
-// ---------- events ----------
+// ---------- events (each lawyer has his own calendar) ----------
 
 function eventFields(data, partial) {
   const out = {};
@@ -621,54 +805,117 @@ function eventFields(data, partial) {
   return out;
 }
 
-async function listEvents(env, url) {
+// Whose calendar an event goes into. Without "events.all" a user manages only his own.
+async function resolveLawyer(env, user, value) {
+  if (!can(user.role, 'events.all')) return user.id;
+  const lawyerId = id(value, 'יומן של', { required: false }) ?? user.id;
+  return userExists(env, lawyerId);
+}
+
+async function loadEventForEdit(env, user, eventId) {
+  const e = await env.DB.prepare('SELECT id, lawyer_id FROM events WHERE id = ?').bind(eventId).first();
+  if (!e) throw new HttpError(404, 'אירוע לא נמצא');
+  if (!can(user.role, 'events.all') && e.lawyer_id !== user.id) throw new HttpError(403, 'אפשר לערוך רק אירועים ביומן שלך');
+  return e;
+}
+
+async function listEvents(env, url, user) {
   const from = date(url.searchParams.get('from'), 'מתאריך') || todayIL();
   const to = date(url.searchParams.get('to'), 'עד תאריך') || addDays(from, 90);
+  const lawyer = url.searchParams.get('lawyer') || (user.role === 'lawyer' ? 'mine' : 'all');
+  const where = ['e.date >= ?', 'e.date <= ?'];
+  const vals = [from, to];
+  if (lawyer === 'mine') { where.push('e.lawyer_id = ?'); vals.push(user.id); }
+  else if (lawyer !== 'all') { where.push('e.lawyer_id = ?'); vals.push(id(lawyer, 'יומן של')); }
   const { results } = await env.DB.prepare(
-    `SELECT e.id, e.kind, e.title, e.date, e.time, e.location, e.notes, e.case_id, c.title AS case_title, cl.name AS client_name
+    `SELECT e.id, e.kind, e.title, e.date, e.time, e.location, e.notes, e.case_id, e.lawyer_id, l.name AS lawyer_name,
+            c.title AS case_title, cl.name AS client_name
      FROM events e LEFT JOIN cases c ON c.id = e.case_id LEFT JOIN clients cl ON cl.id = c.client_id
-     WHERE e.date >= ? AND e.date <= ? ORDER BY e.date, e.time LIMIT 500`
-  ).bind(from, to).all();
-  return json({ events: results, from, to });
+     LEFT JOIN users l ON l.id = e.lawyer_id
+     WHERE ${where.join(' AND ')} ORDER BY e.date, e.time LIMIT 500`
+  ).bind(...vals).all();
+  return json({ events: results, from, to, lawyer });
 }
 
 async function createEvent(request, env, user) {
   const data = await body(request);
   const f = eventFields(data, false);
   const caseId = id(data.case_id, 'תיק', { required: false });
+  const lawyerId = await resolveLawyer(env, user, data.lawyer_id);
   if (caseId && !(await env.DB.prepare('SELECT id FROM cases WHERE id = ?').bind(caseId).first())) throw new ValidationError('תיק לא נמצא');
   const r = await env.DB.prepare(
-    'INSERT INTO events (case_id, kind, title, date, time, location, notes, created_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?)'
-  ).bind(caseId, f.kind, f.title, f.date, f.time, f.location, f.notes, user.id).run();
+    'INSERT INTO events (case_id, lawyer_id, kind, title, date, time, location, notes, created_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)'
+  ).bind(caseId, lawyerId, f.kind, f.title, f.date, f.time, f.location, f.notes, user.id).run();
   await audit(env, user, 'create', 'event', r.meta.last_row_id);
   return json({ id: r.meta.last_row_id });
 }
 
 async function updateEvent(request, env, user, eventId) {
-  const f = eventFields(await body(request), true);
+  const data = await body(request);
+  await loadEventForEdit(env, user, eventId);
+  const f = eventFields(data, true);
+  if (data.lawyer_id !== undefined) f.lawyer_id = await resolveLawyer(env, user, data.lawyer_id);
   const keys = Object.keys(f);
   if (!keys.length) throw new ValidationError('אין מה לעדכן');
-  const r = await env.DB.prepare(`UPDATE events SET ${keys.map((k) => `${k} = ?`).join(', ')} WHERE id = ?`)
+  await env.DB.prepare(`UPDATE events SET ${keys.map((k) => `${k} = ?`).join(', ')} WHERE id = ?`)
     .bind(...keys.map((k) => f[k]), eventId).run();
-  if (!r.meta.changes) throw new HttpError(404, 'אירוע לא נמצא');
   await audit(env, user, 'update', 'event', eventId, keys.join(','));
   return json({ ok: true });
 }
 
 async function deleteEvent(env, user, eventId) {
-  const r = await env.DB.prepare('DELETE FROM events WHERE id = ?').bind(eventId).run();
-  if (!r.meta.changes) throw new HttpError(404, 'אירוע לא נמצא');
+  await loadEventForEdit(env, user, eventId);
+  await env.DB.prepare('DELETE FROM events WHERE id = ?').bind(eventId).run();
   await audit(env, user, 'delete', 'event', eventId);
   return json({ ok: true });
 }
 
-// ---------- audit ----------
+// ---------- audit & system (IT) ----------
 
 async function listAudit(env, user) {
-  requireAdmin(user);
+  requirePerm(user, 'audit.view');
   const { results } = await env.DB.prepare(
     `SELECT a.id, a.action, a.entity, a.entity_id, a.detail, a.at, u.name AS user_name
      FROM audit a LEFT JOIN users u ON u.id = a.user_id ORDER BY a.id DESC LIMIT 300`
   ).all();
   return json({ audit: results });
+}
+
+async function systemStatus(env, user) {
+  requirePerm(user, 'system.view');
+  const [ver, counts, fails] = await env.DB.batch([
+    env.DB.prepare('SELECT MAX(version) AS v FROM schema_version'),
+    env.DB.prepare(
+      `SELECT (SELECT COUNT(*) FROM users WHERE active = 1) AS users,
+              (SELECT COUNT(*) FROM sessions WHERE expires_at > datetime('now')) AS sessions,
+              (SELECT COUNT(*) FROM clients) AS clients,
+              (SELECT COUNT(*) FROM cases) AS cases,
+              (SELECT COUNT(*) FROM tasks) AS tasks,
+              (SELECT COUNT(*) FROM events) AS events`
+    ),
+    env.DB.prepare(
+      `SELECT email, COUNT(*) AS n, MAX(at) AS last FROM login_failures WHERE at > datetime('now', '-1 day') GROUP BY email ORDER BY n DESC LIMIT 20`
+    ),
+  ]);
+  return json({
+    schema: { current: ver.results[0].v, latest: MIGRATIONS.length },
+    mail: { configured: mailConfigured(env) && env.DEV_MAIL_LOG !== '1', from: env.MAIL_FROM || DEFAULT_MAIL_FROM },
+    setupTokenSet: Boolean(env.SETUP_TOKEN),
+    counts: counts.results[0],
+    loginFailures: fails.results,
+  });
+}
+
+async function revokeSessions(request, env, user) {
+  requirePerm(user, 'system.view');
+  const data = await body(request);
+  if (data.all === true) {
+    await env.DB.prepare('DELETE FROM sessions WHERE user_id != ?').bind(user.id).run();
+    await audit(env, user, 'revoke', 'session', null, 'all');
+  } else {
+    const target = id(data.user_id, 'משתמש');
+    await env.DB.prepare('DELETE FROM sessions WHERE user_id = ?').bind(target).run();
+    await audit(env, user, 'revoke', 'session', target);
+  }
+  return json({ ok: true });
 }

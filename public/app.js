@@ -93,13 +93,26 @@ function whenLabel(today, iso) {
   return `בעוד ${n} ימים`;
 }
 function initials(name) {
-  return String(name || '').trim().split(/\s+/).slice(0, 2).map((w) => w[0]).join('');
+  const words = String(name || '').trim().split(/\s+/).filter((w) => /^[\u0590-\u05FFa-zA-Z]/.test(w));
+  return words.slice(0, 2).map((w) => w[0]).join('');
 }
 function stageLabel(key) { return (meta.leadStages.find((s) => s.key === key) || {}).label || key; }
 function processInfo(key) { return meta.processes[key] || meta.processes.general; }
 function stepLabel(proc, step) { return processInfo(proc).steps[step] || ''; }
 function userOptions(empty = 'ללא') {
   return [{ value: '', label: empty }, ...meta.users.map((u) => ({ value: String(u.id), label: u.name }))];
+}
+
+function can(perm) { return Boolean(me && me.perms && me.perms.includes(perm)); }
+function lawyers() { return meta.users.filter((u) => u.role === 'lawyer'); }
+function lawyerOptions() {
+  const list = lawyers().length ? lawyers() : meta.users;
+  return list.map((u) => ({ value: String(u.id), label: u.name }));
+}
+function approvalPill(c) {
+  if (c.approval === 'pending') return h('span', { class: 'pill gold' }, meta.approval.pending);
+  if (c.approval === 'rejected') return h('span', { class: 'pill danger' }, meta.approval.rejected);
+  return null;
 }
 
 function go(hash) { if (location.hash !== hash) location.hash = hash; else render(); }
@@ -164,8 +177,12 @@ function clientForm(existing, after) {
     title: existing ? 'עריכת פרטי לקוח' : 'לקוח / ליד חדש',
     fields: [
       { name: 'name', label: 'שם מלא / שם חברה', required: true, value: c.name, full: true, max: 120 },
-      { name: 'kind', label: 'סוג', type: 'select', value: c.kind || 'lead', options: [{ value: 'lead', label: 'ליד (פנייה)' }, { value: 'client', label: 'לקוח' }] },
-      { name: 'stage', label: 'שלב', type: 'select', value: c.stage || 'new', options: meta.leadStages.map((s) => ({ value: s.key, label: s.label })) },
+      { name: 'kind', label: 'סוג', type: 'select', value: c.kind || 'lead',
+        options: (can('clients.approve') || c.approval === 'approved')
+          ? [{ value: 'lead', label: 'ליד (פנייה)' }, { value: 'client', label: 'לקוח' }]
+          : [{ value: 'lead', label: 'ליד (פנייה) – יועבר לאישור עו"ד' }] },
+      { name: 'stage', label: 'שלב', type: 'select', value: c.stage || 'new',
+        options: meta.leadStages.filter((s) => s.key !== 'signed' || can('clients.approve') || c.approval === 'approved').map((s) => ({ value: s.key, label: s.label })) },
       { name: 'phone', label: 'טלפון', type: 'tel', value: c.phone, dir: 'ltr', max: 30 },
       { name: 'email', label: 'אימייל', type: 'email', value: c.email, dir: 'ltr' },
       { name: 'id_number', label: 'ת"ז / ח"פ', value: c.id_number, dir: 'ltr', max: 20 },
@@ -177,7 +194,11 @@ function clientForm(existing, after) {
     onSubmit: async (v) => {
       v.owner_id = nullIfEmpty(v.owner_id);
       if (existing) { await api('clients/' + existing.id, { method: 'PATCH', body: v }); toast('הפרטים נשמרו'); after && after(existing.id); }
-      else { const r = await api('clients', { method: 'POST', body: v }); toast('נשמר'); after && after(r.id); }
+      else {
+        const r = await api('clients', { method: 'POST', body: v });
+        toast(r.approval === 'pending' ? 'נשמר והועבר לאישור עורך דין' : 'נשמר');
+        after && after(r.id);
+      }
     },
   });
 }
@@ -240,7 +261,7 @@ function taskForm({ caseId, existing } = {}, after) {
   });
 }
 
-function eventForm({ caseId, existing, cases } = {}, after) {
+function eventForm({ caseId, existing, cases, lawyerId } = {}, after) {
   const e = existing || {};
   const fields = [
     { name: 'title', label: 'כותרת', required: true, value: e.title, full: true, max: 160 },
@@ -249,6 +270,10 @@ function eventForm({ caseId, existing, cases } = {}, after) {
     { name: 'time', label: 'שעה', type: 'time', value: e.time },
     { name: 'location', label: 'מיקום', value: e.location, max: 160 },
   ];
+  if (can('events.all')) {
+    fields.splice(1, 0, { name: 'lawyer_id', label: 'ביומן של', type: 'select', required: true,
+      value: e.lawyer_id ?? lawyerId ?? (me.role === 'lawyer' ? me.id : lawyerOptions()[0]?.value), options: lawyerOptions() });
+  }
   if (!caseId && !existing && cases) {
     fields.push({ name: 'case_id', label: 'תיק', type: 'select', full: true,
       options: [{ value: '', label: 'ללא תיק' }, ...cases.map((c) => ({ value: String(c.id), label: `${c.client_name} – ${c.title}` }))] });
@@ -283,7 +308,8 @@ function layout(...content) {
   const nav = h('nav', { class: 'nav', 'aria-label': 'תפריט ראשי' },
     NAV.map((n) => h('a', { href: n.href, class: n.match.test(hash) ? 'active' : '', 'aria-current': n.match.test(hash) ? 'page' : null }, n.label)),
     SOON.map((s) => h('span', { class: 'disabled' }, s, h('span', { class: 'soon' }, 'בקרוב'))),
-    me.role === 'admin' ? h('a', { href: '#/users', class: /^#\/users/.test(hash) ? 'active' : '' }, 'משתמשים ויומן פעולות') : null,
+    can('audit.view') ? h('a', { href: '#/audit', class: /^#\/audit/.test(hash) ? 'active' : '' }, 'יומן פעולות') : null,
+    can('users.manage') ? h('a', { href: '#/users', class: /^#\/users/.test(hash) ? 'active' : '' }, 'ניהול מערכת (IT)') : null,
   );
   return h('div', { class: 'shell' },
     h('aside', { class: 'side' },
@@ -323,43 +349,81 @@ async function viewDashboard() {
   const dt = new Date(today + 'T12:00:00Z');
   const hour = Number(new Intl.DateTimeFormat('en-GB', { timeZone: 'Asia/Jerusalem', hour: 'numeric', hour12: false }).format(new Date()));
   const greet = hour < 12 ? 'בוקר טוב' : hour < 17 ? 'צהריים טובים' : 'ערב טוב';
+  const c = d.counts;
+  const refresh = () => render();
+  const isLawyer = me.role === 'lawyer';
+  const isSecretary = me.role === 'secretary';
+
+  const stats = isSecretary
+    ? [stat('לידים חדשים', c.new_leads, 'ממתינים לטיפול'),
+       stat('מועדים השבוע', c.week_events, 'ביומן כל עורכי הדין'),
+       stat('משימות פתוחות שלי', c.my_open_tasks, c.overdue_tasks ? `${c.overdue_tasks} באיחור במשרד` : 'אין משימות באיחור', c.overdue_tasks > 0),
+       stat('ממתינים לאישור עו"ד', c.pending_approvals, 'לקוחות שהוזנו')]
+    : [stat('ממתינים לאישורך', c.pending_approvals, 'לקוחות חדשים', c.pending_approvals > 0),
+       stat(isLawyer ? 'מועדים היום ביומן שלי' : 'מועדים היום', c.today_events, `${c.week_events} השבוע`),
+       stat('משימות פתוחות שלי', c.my_open_tasks, 'הועברו לטיפולך'),
+       stat('באיחור במשרד', c.overdue_tasks, 'משימות שעבר מועדן', c.overdue_tasks > 0)];
+
+  const pendingCard = d.pending.length || can('clients.approve') ? h('section', { class: 'card' },
+    h('div', { class: 'card-head' }, h('h2', {}, can('clients.approve') ? 'לקוחות לאישורך' : 'ממתינים לאישור עו"ד'),
+      h('a', { href: '#/clients?approval=pending' }, 'לכל הממתינים')),
+    d.pending.length ? d.pending.map((p) => h('div', { class: 'list-item' },
+      h('div', { class: 'grow' }, h('a', { class: 'title', href: '#/clients/' + p.id }, p.name),
+        h('span', { class: 'meta' }, [p.kind === 'lead' ? stageLabel(p.stage) : 'לקוח', p.source, p.created_by_name ? 'הוזן ע"י ' + p.created_by_name : null].filter(Boolean).join(' · '))),
+      can('clients.approve') ? approveButtons(p.id, refresh) : h('span', { class: 'pill gold' }, 'ממתין'))) : h('div', { class: 'empty' }, 'אין לקוחות שממתינים לאישור.')) : null;
+
+  const eventsCard = h('section', { class: 'card' },
+    h('div', { class: 'card-head' }, h('h2', {}, isLawyer ? 'היומן שלי' : 'יומן עורכי הדין'), h('a', { href: '#/calendar' }, 'ליומן המלא')),
+    d.events.length ? d.events.map((e) => eventItem(e, today)) : h('div', { class: 'empty' }, 'אין מועדים קרובים ביומן.'));
+
+  const tasksCard = h('section', { class: 'card' },
+    h('div', { class: 'card-head' }, h('h2', {}, isSecretary ? 'המשימות שלי' : 'הועבר לטיפולך'), h('a', { href: '#/tasks' }, 'לכל המשימות')),
+    d.myTasks.length ? d.myTasks.map((t) => taskRow(t, today, refresh, true)) : h('div', { class: 'empty' }, 'אין משימות פתוחות.'));
+
+  const casesCard = h('section', { class: 'card' },
+    h('div', { class: 'card-head' }, h('h2', {}, isLawyer ? 'התיקים שלי' : 'תיקים פעילים'), h('a', { href: '#/cases' + (isLawyer ? '?mine=1' : '') }, 'לכל התיקים')),
+    d.cases.length ? casesTable(d.cases) : h('div', { class: 'empty' }, 'אין תיקים פתוחים.'));
+
+  const overdueCard = d.overdue ? h('section', { class: 'card' },
+    h('div', { class: 'card-head' }, h('h2', {}, 'פיקוח: באיחור במשרד'), h('a', { href: '#/tasks?scope=overdue' }, 'לכל המשימות באיחור')),
+    d.overdue.length ? d.overdue.map((t) => taskRow(t, today, refresh, true)) : h('div', { class: 'empty' }, 'אין משימות באיחור. יפה.')) : null;
+
   const pipelineMap = Object.fromEntries(d.pipeline.map((p) => [p.stage, p.n]));
   const maxP = Math.max(1, ...d.pipeline.map((p) => p.n));
-  const c = d.counts;
+  const pipelineCard = h('section', { class: 'card' },
+    h('div', { class: 'card-head' }, h('h2', {}, 'לידים בתהליך'), h('a', { href: '#/clients?kind=lead' }, 'לכל הלידים')),
+    meta.leadStages.filter((s) => s.key !== 'lost').map((s) => h('div', {},
+      h('div', { class: 'card-head' }, h('span', {}, s.label), h('strong', {}, pipelineMap[s.key] || 0)),
+      h('div', { class: 'bar' + (s.key === 'signed' ? ' gold' : '') }, barFill((pipelineMap[s.key] || 0) / maxP)))));
+
+  const wide = isSecretary ? [eventsCard, casesCard] : [pendingCard, eventsCard, casesCard];
+  const narrow = isSecretary ? [tasksCard, pendingCard, pipelineCard] : [tasksCard, overdueCard, pipelineCard];
+
   return layout(
     header({
       eyebrow: `יום ${DAYS[dt.getUTCDay()]}, ${fmtDate(today)}`,
       title: `${greet}, ${me.name.split(' ')[0]}`,
       actions: [
-        h('button', { class: 'btn', type: 'button', onClick: () => eventForm({}, render) }, '+ מועד ביומן'),
+        h('button', { class: 'btn', type: 'button', onClick: () => eventForm({}, refresh) }, '+ מועד ביומן'),
         h('button', { class: 'btn primary', type: 'button', onClick: () => clientForm(null, (id) => go('#/clients/' + id)) }, '+ לקוח / ליד חדש'),
       ],
     }),
-    h('section', { class: 'stats', 'aria-label': 'תמונת מצב' },
-      stat('תיקים פעילים', c.open_cases, 'כל המשרד'),
-      stat('מועדים השבוע', c.week_events, '7 הימים הקרובים'),
-      stat('משימות פתוחות שלי', c.my_open_tasks, c.overdue_tasks ? `${c.overdue_tasks} באיחור במשרד` : 'אין משימות באיחור', c.overdue_tasks > 0),
-      stat('לידים חדשים', c.new_leads, 'ממתינים לטיפול'),
-    ),
-    h('div', { class: 'row' },
-      h('div', { class: 'wide' },
-        h('section', { class: 'card' },
-          h('div', { class: 'card-head' }, h('h2', {}, 'מועדים קרובים'), h('a', { href: '#/calendar' }, 'ליומן המלא')),
-          d.events.length ? d.events.map((e) => eventItem(e, today)) : h('div', { class: 'empty' }, 'אין מועדים קרובים ביומן.')),
-        h('section', { class: 'card' },
-          h('div', { class: 'card-head' }, h('h2', {}, 'תיקים פעילים'), h('a', { href: '#/cases' }, 'לכל התיקים')),
-          d.cases.length ? casesTable(d.cases) : h('div', { class: 'empty' }, 'עוד אין תיקים פתוחים. פותחים תיק מתוך כרטיס לקוח.'))),
-      h('div', { class: 'narrow' },
-        h('section', { class: 'card' },
-          h('div', { class: 'card-head' }, h('h2', {}, 'המשימות שלי'), h('a', { href: '#/tasks' }, 'לכל המשימות')),
-          d.myTasks.length ? d.myTasks.map((t) => taskRow(t, today, render, true)) : h('div', { class: 'empty' }, 'אין משימות פתוחות.')),
-        h('section', { class: 'card' },
-          h('div', { class: 'card-head' }, h('h2', {}, 'לידים בתהליך'), h('a', { href: '#/clients?kind=lead' }, 'לכל הלידים')),
-          meta.leadStages.filter((s) => s.key !== 'lost').map((s) => h('div', { style: null },
-            h('div', { class: 'card-head' }, h('span', {}, s.label), h('strong', {}, pipelineMap[s.key] || 0)),
-            h('div', { class: 'bar' + (s.key === 'signed' ? ' gold' : '') }, barFill((pipelineMap[s.key] || 0) / maxP)))))),
-    ),
+    h('section', { class: 'stats', 'aria-label': 'תמונת מצב' }, stats),
+    h('div', { class: 'row' }, h('div', { class: 'wide' }, wide), h('div', { class: 'narrow' }, narrow)),
   );
+}
+
+function approveButtons(clientId, refresh) {
+  const decide = async (decision) => {
+    try {
+      await api(`clients/${clientId}/approval`, { method: 'POST', body: { decision } });
+      toast(decision === 'approved' ? 'הלקוח אושר' : 'הלקוח סומן כלא מאושר');
+      refresh();
+    } catch (e) { toast(e.message, true); }
+  };
+  return h('span', { class: 'actions-inline' },
+    h('button', { class: 'btn small primary', type: 'button', onClick: () => decide('approved') }, 'אישור'),
+    h('button', { class: 'btn small ghost', type: 'button', onClick: () => { if (confirm('לסמן את הלקוח כלא מאושר?')) decide('rejected'); } }, 'דחייה'));
 }
 
 function barFill(ratio) {
@@ -372,12 +436,13 @@ function stat(label, value, note, alert = false) {
   return h('div', { class: 'stat' + (alert ? ' alert' : '') }, h('span', { class: 'label' }, label), h('span', { class: 'value' }, value ?? 0), h('span', { class: 'note' }, note));
 }
 
-function eventItem(e, today, actions) {
+function eventItem(e, today, actions, showLawyer = me.role !== 'lawyer') {
   const n = daysFrom(today, e.date);
   return h('div', { class: 'list-item' }, dateBox(e.date),
     h('div', { class: 'grow' },
       h('span', { class: 'title' }, e.title),
-      h('span', { class: 'meta' }, [meta.eventKinds[e.kind], e.time, e.client_name ? `${e.client_name} · ${e.case_title}` : null, e.location].filter(Boolean).join(' · '))),
+      h('span', { class: 'meta' }, [meta.eventKinds[e.kind], e.time, showLawyer && e.lawyer_name ? 'יומן ' + e.lawyer_name : null,
+        e.client_name ? `${e.client_name} · ${e.case_title}` : null, e.location].filter(Boolean).join(' · '))),
     h('span', { class: 'pill ' + (n <= 3 ? 'danger' : 'gold') }, whenLabel(today, e.date)),
     actions || null);
 }
@@ -416,9 +481,11 @@ function taskRow(t, today, refresh, showCase = false) {
 
 async function viewClients(params) {
   const kind = params.get('kind') || '';
+  const approval = params.get('approval') || '';
   const q = params.get('q') || '';
   const qs = new URLSearchParams();
   if (kind) qs.set('kind', kind);
+  if (approval) qs.set('approval', approval);
   if (q) qs.set('q', q);
   const { clients } = await api('clients?' + qs);
   const setParam = (k, v) => { const p = new URLSearchParams(params); if (v) p.set(k, v); else p.delete(k); go('#/clients' + (p.toString() ? '?' + p : '')); };
@@ -427,13 +494,15 @@ async function viewClients(params) {
       searchBox(q, (v) => setParam('q', v), 'חיפוש לפי שם, טלפון, אימייל או ת"ז'),
       h('button', { class: 'btn primary', type: 'button', onClick: () => clientForm(null, (id) => go('#/clients/' + id)) }, '+ חדש'),
     ] }),
-    h('div', { class: 'tabs' }, [['', 'הכל'], ['lead', 'לידים'], ['client', 'לקוחות']].map(([k, l]) =>
-      h('a', { href: '#/clients' + (k ? '?kind=' + k : ''), class: kind === k ? 'active' : '' }, l))),
+    h('div', { class: 'tabs' },
+      [['', 'הכל'], ['lead', 'לידים'], ['client', 'לקוחות']].map(([k, l]) =>
+        h('a', { href: '#/clients' + (k ? '?kind=' + k : ''), class: !approval && kind === k ? 'active' : '' }, l)),
+      h('a', { href: '#/clients?approval=pending', class: approval === 'pending' ? 'active' : '' }, 'ממתינים לאישור עו"ד')),
     h('section', { class: 'card' }, clients.length ? h('div', { class: 'table-wrap' }, h('table', {},
       h('thead', {}, h('tr', {}, ['שם', 'סטטוס', 'טלפון', 'אימייל', 'תיקים פתוחים', 'אחראי'].map((t) => h('th', { scope: 'col' }, t)))),
       h('tbody', {}, clients.map((c) => h('tr', { class: 'click', onClick: () => go('#/clients/' + c.id) },
         h('td', {}, h('a', { href: '#/clients/' + c.id }, c.name)),
-        h('td', {}, c.kind === 'client' ? h('span', { class: 'pill' }, 'לקוח') : h('span', { class: 'pill gold' }, stageLabel(c.stage))),
+        h('td', {}, approvalPill(c) || (c.kind === 'client' ? h('span', { class: 'pill' }, 'לקוח') : h('span', { class: 'pill gold' }, stageLabel(c.stage)))),
         h('td', { dir: 'ltr', style: null }, c.phone || '—'),
         h('td', { dir: 'ltr' }, c.email || '—'),
         h('td', {}, c.open_cases),
@@ -443,10 +512,10 @@ async function viewClients(params) {
 }
 
 async function viewClient(clientId) {
-  const { client: c, cases, notes } = await api('clients/' + clientId);
+  const { client: c, cases } = await api('clients/' + clientId);
   const refresh = () => render();
   const stageSelect = h('select', { 'aria-label': 'שלב הליד', class: 'btn small ghost' },
-    meta.leadStages.map((s) => h('option', { value: s.key, selected: s.key === c.stage }, s.label)));
+    meta.leadStages.filter((s) => s.key !== 'signed' || c.approval === 'approved').map((s) => h('option', { value: s.key, selected: s.key === c.stage }, s.label)));
   stageSelect.addEventListener('change', async () => {
     try { await api('clients/' + c.id, { method: 'PATCH', body: { stage: stageSelect.value } }); toast('השלב עודכן'); refresh(); }
     catch (e) { toast(e.message, true); }
@@ -459,13 +528,20 @@ async function viewClient(clientId) {
       actions: [
         c.kind === 'lead' ? stageSelect : null,
         h('button', { class: 'btn', type: 'button', onClick: () => clientForm(c, refresh) }, 'עריכת פרטים'),
-        h('button', { class: 'btn primary', type: 'button', onClick: () => caseForm(null, { clientId: c.id }, (id) => go('#/cases/' + id)) }, '+ פתיחת תיק'),
+        c.approval === 'approved'
+          ? h('button', { class: 'btn primary', type: 'button', onClick: () => caseForm(null, { clientId: c.id }, (id) => go('#/cases/' + id)) }, '+ פתיחת תיק')
+          : null,
       ],
     }),
+    c.approval !== 'approved' ? h('section', { class: 'card approval-banner' + (c.approval === 'rejected' ? ' rejected' : '') },
+      h('div', { class: 'card-head' },
+        h('div', {}, h('h2', {}, c.approval === 'pending' ? 'ממתין לאישור עורך דין' : 'עורך דין לא אישר את הלקוח'),
+          h('div', { class: 'sub' }, [c.created_by_name ? 'הוזן ע"י ' + c.created_by_name : null, c.approved_by_name && c.approval === 'rejected' ? 'נבדק ע"י ' + c.approved_by_name : null].filter(Boolean).join(' · ') || 'עד לאישור אי אפשר לפתוח תיק.')),
+        can('clients.approve') ? approveButtons(c.id, refresh) : null)) : null,
     h('div', { class: 'row' },
       h('div', { class: 'wide' },
         h('section', { class: 'card' }, h('h2', {}, 'תיקים'),
-          cases.length ? casesTable(cases.map((x) => ({ ...x, client_name: c.name }))) : h('div', { class: 'empty' }, 'אין תיקים. פתיחת תיק הופכת ליד ללקוח.')),
+          cases.length ? casesTable(cases.map((x) => ({ ...x, client_name: c.name }))) : h('div', { class: 'empty' }, c.approval === 'approved' ? 'אין תיקים. פתיחת תיק הופכת ליד ללקוח.' : 'אין תיקים.')),
         c.notes ? h('section', { class: 'card' }, h('h2', {}, 'הערות'), h('div', { class: 'note' }, h('div', { class: 'text' }, c.notes))) : null),
       h('div', { class: 'narrow' },
         h('section', { class: 'card' }, h('h2', {}, 'פרטי קשר'),
@@ -475,7 +551,8 @@ async function viewClient(clientId) {
             kv('ת"ז / ח"פ', c.id_number || '—'),
             kv('כתובת', c.address || '—'),
             kv('מקור הפנייה', c.source || '—'),
-            kv('נוצר', fmtDateTime(c.created_at)))),
+            kv('נוצר', fmtDateTime(c.created_at)),
+            c.approval === 'approved' && c.approved_by_name ? kv('אושר ע"י', `${c.approved_by_name} · ${fmtDateTime(c.approved_at)}`) : null)),
       )),
   );
 }
@@ -485,11 +562,12 @@ function kv(k, v) { return h('div', {}, h('span', { class: 'k' }, k), h('span', 
 async function viewCases(params) {
   const status = params.get('status') || 'open';
   const q = params.get('q') || '';
-  const { cases } = await api(`cases?status=${encodeURIComponent(status)}&q=${encodeURIComponent(q)}`);
+  const mine = params.get('mine') === '1';
+  const { cases } = await api(`cases?status=${encodeURIComponent(status)}&q=${encodeURIComponent(q)}${mine ? '&mine=1' : ''}`);
   const setParam = (k, v) => { const p = new URLSearchParams(params); if (v) p.set(k, v); else p.delete(k); go('#/cases' + (p.toString() ? '?' + p : '')); };
   const openNew = async () => {
-    const { clients } = await api('clients');
-    if (!clients.length) { toast('קודם מוסיפים לקוח', true); return; }
+    const { clients } = await api('clients?approval=approved');
+    if (!clients.length) { toast('אין לקוחות מאושרים. קודם עורך דין מאשר את הלקוח.', true); return; }
     caseForm(null, { clients }, (id) => go('#/cases/' + id));
   };
   return layout(
@@ -497,8 +575,10 @@ async function viewCases(params) {
       searchBox(q, (v) => setParam('q', v), 'חיפוש לפי לקוח, תיק, מספר או צד שכנגד'),
       h('button', { class: 'btn primary', type: 'button', onClick: openNew }, '+ תיק חדש'),
     ] }),
-    h('div', { class: 'tabs' }, [['open', 'פתוחים'], ['closed', 'סגורים'], ['all', 'הכל']].map(([k, l]) =>
-      h('a', { href: '#/cases?status=' + k, class: status === k ? 'active' : '' }, l))),
+    h('div', { class: 'tabs' },
+      [['open', 'פתוחים'], ['closed', 'סגורים'], ['all', 'הכל']].map(([k, l]) =>
+        h('a', { href: '#/cases?status=' + k + (mine ? '&mine=1' : ''), class: status === k ? 'active' : '' }, l)),
+      h('a', { href: '#/cases?status=' + status + (mine ? '' : '&mine=1'), class: mine ? 'active' : '' }, 'רק שלי')),
     h('section', { class: 'card' }, cases.length ? casesTable(cases) : h('div', { class: 'empty' }, 'אין תיקים להצגה.')),
   );
 }
@@ -534,7 +614,7 @@ async function viewCase(caseId) {
       actions: [
         h('a', { class: 'btn ghost', href: '#/clients/' + c.client_id }, 'כרטיס לקוח'),
         h('button', { class: 'btn', type: 'button', onClick: () => caseForm(c, {}, refresh) }, 'עריכה'),
-        h('button', { class: 'btn', type: 'button', onClick: toggleStatus }, c.status === 'open' ? 'סגירת תיק' : 'פתיחה מחדש'),
+        can('cases.close') ? h('button', { class: 'btn', type: 'button', onClick: toggleStatus }, c.status === 'open' ? 'סגירת תיק' : 'פתיחה מחדש') : null,
         h('button', { class: 'btn primary', type: 'button', onClick: () => taskForm({ caseId: c.id }, refresh) }, '+ משימה'),
       ],
     }),
@@ -558,8 +638,8 @@ async function viewCase(caseId) {
             : h('div', { class: 'empty' }, 'עוד אין הערות.'))),
       h('div', { class: 'narrow' },
         h('section', { class: 'card' },
-          h('div', { class: 'card-head' }, h('h2', {}, 'מועדים'), h('button', { class: 'btn small', type: 'button', onClick: () => eventForm({ caseId: c.id }, refresh) }, '+ מועד')),
-          events.length ? events.map((e) => eventItem(e, meta.today, eventActions(e, refresh))) : h('div', { class: 'empty' }, 'אין מועדים לתיק.')),
+          h('div', { class: 'card-head' }, h('h2', {}, 'מועדים'), h('button', { class: 'btn small', type: 'button', onClick: () => eventForm({ caseId: c.id, lawyerId: c.owner_id }, refresh) }, '+ מועד')),
+          events.length ? events.map((e) => eventItem(e, meta.today, eventActions(e, refresh), true)) : h('div', { class: 'empty' }, 'אין מועדים לתיק.')),
         h('section', { class: 'card' }, h('h2', {}, 'פרטי התיק'),
           h('div', { class: 'kv' },
             kv('ערכאה', c.court || '—'),
@@ -573,6 +653,7 @@ async function viewCase(caseId) {
 }
 
 function eventActions(e, refresh) {
+  if (!can('events.all') && e.lawyer_id !== me.id) return null;
   return h('span', { style: null },
     h('button', { class: 'iconbtn', type: 'button', 'aria-label': 'עריכת אירוע', onClick: () => eventForm({ existing: e }, refresh) }, icon(ICONS.edit, 16)),
     h('button', { class: 'iconbtn', type: 'button', 'aria-label': 'מחיקת אירוע', onClick: async () => {
@@ -583,19 +664,31 @@ function eventActions(e, refresh) {
 
 async function viewCalendar(params) {
   const from = params.get('from') || meta.today;
-  const [{ events, to }, { cases }] = await Promise.all([api('events?from=' + encodeURIComponent(from)), api('cases?status=open')]);
+  const lawyer = params.get('lawyer') || (me.role === 'lawyer' ? 'mine' : 'all');
+  const [{ events, to }, { cases }] = await Promise.all([
+    api(`events?from=${encodeURIComponent(from)}&lawyer=${encodeURIComponent(lawyer)}`),
+    api('cases?status=open'),
+  ]);
   const refresh = () => render();
+  const setParam = (k, v) => { const p = new URLSearchParams(params); if (v) p.set(k, v); else p.delete(k); go('#/calendar' + (p.toString() ? '?' + p : '')); };
+  const filter = h('select', { class: 'lawyer-filter', 'aria-label': 'איזה יומן להציג' },
+    h('option', { value: 'mine', selected: lawyer === 'mine' }, 'היומן שלי'),
+    h('option', { value: 'all', selected: lawyer === 'all' }, 'כל עורכי הדין'),
+    lawyers().filter((u) => u.id !== me.id).map((u) => h('option', { value: String(u.id), selected: lawyer === String(u.id) }, 'היומן של ' + u.name)));
+  filter.addEventListener('change', () => setParam('lawyer', filter.value));
   const byDate = new Map();
   for (const e of events) { if (!byDate.has(e.date)) byDate.set(e.date, []); byDate.get(e.date).push(e); }
+  const selectedLawyer = /^\d+$/.test(lawyer) ? Number(lawyer) : lawyer === 'mine' ? me.id : undefined;
   return layout(
     header({ title: 'יומן ומועדים', sub: `${fmtDate(from)} – ${fmtDate(to)}`, actions: [
-      from !== meta.today ? h('a', { class: 'btn ghost', href: '#/calendar' }, 'להיום') : h('a', { class: 'btn ghost', href: '#/calendar?from=' + shiftDate(meta.today, -60) }, 'מועדים קודמים'),
-      h('button', { class: 'btn primary', type: 'button', onClick: () => eventForm({ cases }, refresh) }, '+ מועד / אירוע'),
+      filter,
+      from !== meta.today ? h('a', { class: 'btn ghost', href: '#/calendar' }, 'להיום') : h('button', { class: 'btn ghost', type: 'button', onClick: () => setParam('from', shiftDate(meta.today, -60)) }, 'מועדים קודמים'),
+      h('button', { class: 'btn primary', type: 'button', onClick: () => eventForm({ cases, lawyerId: selectedLawyer }, refresh) }, '+ מועד / אירוע'),
     ] }),
     h('section', { class: 'card' },
       events.length ? [...byDate.entries()].map(([d, list]) => [
-        h('h3', { style: null }, `יום ${DAYS[new Date(d + 'T12:00:00Z').getUTCDay()]}, ${fmtDate(d)}`),
-        list.map((e) => eventItem(e, meta.today, eventActions(e, refresh))),
+        h('h3', {}, `יום ${DAYS[new Date(d + 'T12:00:00Z').getUTCDay()]}, ${fmtDate(d)}`),
+        list.map((e) => eventItem(e, meta.today, eventActions(e, refresh), lawyer !== 'mine')),
       ]) : h('div', { class: 'empty' }, 'אין אירועים בטווח הזה.')),
   );
 }
@@ -606,31 +699,65 @@ function shiftDate(iso, days) {
 
 async function viewTasks(params) {
   const scope = params.get('scope') || 'mine';
-  const done = params.get('done') === '1';
+  const done = params.get('done') === '1' && scope !== 'overdue';
   const { tasks, today } = await api(`tasks?scope=${scope}&done=${done ? 1 : 0}`);
   const refresh = () => render();
   const link = (s, d) => `#/tasks?scope=${s}${d ? '&done=1' : ''}`;
   return layout(
     header({ title: 'משימות', actions: [h('button', { class: 'btn primary', type: 'button', onClick: () => taskForm({}, refresh) }, '+ משימה')] }),
     h('div', { class: 'tabs' },
-      h('a', { href: link('mine', done), class: scope === 'mine' ? 'active' : '' }, 'שלי'),
+      h('a', { href: link('mine', done), class: scope === 'mine' ? 'active' : '' }, me.role === 'secretary' ? 'שלי' : 'הועבר לטיפולי'),
       h('a', { href: link('all', done), class: scope === 'all' ? 'active' : '' }, 'כל המשרד'),
-      h('a', { href: link(scope, !done), class: done ? 'active' : '' }, done ? 'מציג בוצעו' : 'הצגת בוצעו')),
+      can('office.supervise') ? h('a', { href: link('overdue', false), class: scope === 'overdue' ? 'active' : '' }, 'באיחור במשרד') : null,
+      scope !== 'overdue' ? h('a', { href: link(scope, !done), class: done ? 'active' : '' }, done ? 'מציג בוצעו' : 'הצגת בוצעו') : null),
     h('section', { class: 'card' }, tasks.length ? tasks.map((t) => taskRow(t, today, refresh, true)) : h('div', { class: 'empty' }, done ? 'אין משימות שבוצעו.' : 'אין משימות פתוחות.')),
   );
 }
 
+const AUDIT_ACTIONS = { login: 'כניסה', setup: 'הקמת המערכת', create: 'יצירה', update: 'עדכון', delete: 'מחיקה', step: 'מעבר שלב',
+  password: 'החלפת סיסמה', approve: 'אישור לקוח', reject: 'דחיית לקוח', close: 'סגירת תיק', reopen: 'פתיחת תיק מחדש', revoke: 'ניתוק סשנים' };
+const AUDIT_ENTITIES = { user: 'משתמש', client: 'לקוח', case: 'תיק', task: 'משימה', event: 'אירוע', session: 'סשן' };
+const ENTITY_LINK = { client: '#/clients/', case: '#/cases/' };
+
+async function viewAudit() {
+  if (!can('audit.view')) return go('#/');
+  const { audit } = await api('audit');
+  return layout(
+    header({ title: 'יומן פעולות', sub: '300 הפעולות האחרונות במערכת' }),
+    h('section', { class: 'card' }, h('div', { class: 'table-wrap' }, h('table', {},
+      h('thead', {}, h('tr', {}, ['מתי', 'מי', 'פעולה', 'על מה'].map((t) => h('th', { scope: 'col' }, t)))),
+      h('tbody', {}, audit.map((a) => h('tr', {},
+        h('td', {}, fmtDateTime(a.at)), h('td', {}, a.user_name || '—'), h('td', {}, AUDIT_ACTIONS[a.action] || a.action),
+        h('td', {}, ENTITY_LINK[a.entity] && a.entity_id
+          ? h('a', { href: ENTITY_LINK[a.entity] + a.entity_id }, `${AUDIT_ENTITIES[a.entity]} #${a.entity_id}`)
+          : `${AUDIT_ENTITIES[a.entity] || a.entity}${a.entity_id ? ' #' + a.entity_id : ''}`))))))),
+  );
+}
+
+function permissionsCard() {
+  const roles = Object.keys(meta.roles);
+  const mark = (yes) => (yes ? h('span', { class: 'perm-yes', 'aria-label': 'כן' }, '✓') : h('span', { class: 'perm-no', 'aria-label': 'לא' }, '—'));
+  const head = h('tr', {}, h('th', { scope: 'col' }, 'הרשאה'), roles.map((r) => h('th', { scope: 'col' }, meta.roles[r])));
+  const rows = Object.entries(meta.permissions).map(([p, label]) =>
+    h('tr', {}, h('td', {}, label), roles.map((r) => h('td', {}, mark(meta.rolePerms[r].includes(p))))));
+  return h('section', { class: 'card' },
+    h('h2', {}, 'הרשאות לפי תפקיד'),
+    h('div', { class: 'table-wrap' }, h('table', {}, h('thead', {}, head), h('tbody', {}, rows))),
+    h('p', { class: 'sub' }, 'כל התפקידים יכולים לנהל לקוחות, לידים, תיקים, משימות והערות. מזכירות מזינה לקוחות, ועורך דין מאשר אותם לפני פתיחת תיק.'));
+}
+
 async function viewUsers() {
-  if (me.role !== 'admin') return go('#/');
-  const [{ users }, { audit }] = await Promise.all([api('users'), api('audit')]);
+  if (!can('users.manage')) return go('#/');
+  const [{ users }, sys] = await Promise.all([api('users'), api('system')]);
   const refresh = async () => { meta = await api('meta'); render(); };
+  const roleOptions = Object.entries(meta.roles).map(([k, l]) => ({ value: k, label: l }));
   const addUser = () => openForm({
     title: 'משתמש חדש',
     fields: [
       { name: 'name', label: 'שם', required: true, max: 80 },
-      { name: 'email', label: 'אימייל', type: 'email', required: true, dir: 'ltr' },
-      { name: 'role', label: 'תפקיד', type: 'select', value: 'lawyer', options: Object.entries(meta.roles).map(([k, l]) => ({ value: k, label: l })) },
-      { name: 'password', label: 'סיסמה זמנית (לפחות 10 תווים)', type: 'text', required: true, dir: 'ltr', minlength: 10 },
+      { name: 'email', label: 'אימייל (אליו יישלחו קודי הכניסה)', type: 'email', required: true, dir: 'ltr' },
+      { name: 'role', label: 'תפקיד', type: 'select', value: 'secretary', options: roleOptions },
+      { name: 'password', label: 'סיסמה זמנית (10+ תווים, אותיות וספרות)', type: 'text', required: true, dir: 'ltr', minlength: 10 },
     ],
     onSubmit: async (v) => { await api('users', { method: 'POST', body: v }); toast('המשתמש נוסף. בכניסה הראשונה יתבקש להחליף סיסמה.'); await refresh(); },
   });
@@ -638,7 +765,7 @@ async function viewUsers() {
     title: 'עריכת משתמש – ' + u.name,
     fields: [
       { name: 'name', label: 'שם', required: true, value: u.name, max: 80 },
-      { name: 'role', label: 'תפקיד', type: 'select', value: u.role, options: Object.entries(meta.roles).map(([k, l]) => ({ value: k, label: l })) },
+      { name: 'role', label: 'תפקיד', type: 'select', value: u.role, options: roleOptions },
       { name: 'active', label: 'סטטוס', type: 'select', value: u.active ? '1' : '0', options: [{ value: '1', label: 'פעיל' }, { value: '0', label: 'מושבת' }] },
       { name: 'password', label: 'סיסמה זמנית חדשה (ריק = ללא שינוי)', type: 'text', dir: 'ltr' },
     ],
@@ -650,22 +777,41 @@ async function viewUsers() {
       await refresh();
     },
   });
-  const ACTIONS = { login: 'כניסה', setup: 'הקמת המערכת', create: 'יצירה', update: 'עדכון', delete: 'מחיקה', step: 'מעבר שלב', password: 'החלפת סיסמה' };
-  const ENTITIES = { user: 'משתמש', client: 'לקוח', case: 'תיק', task: 'משימה', event: 'אירוע' };
+  const revoke = async (body, label) => {
+    if (!confirm(label)) return;
+    try { await api('system/revoke', { method: 'POST', body }); toast('הסשנים נותקו'); render(); } catch (e) { toast(e.message, true); }
+  };
+  const ok = (b) => h('span', { class: 'pill ' + (b ? 'ok' : 'danger') }, b ? 'תקין' : 'לא מוגדר');
   return layout(
-    header({ title: 'משתמשים', actions: [h('button', { class: 'btn primary', type: 'button', onClick: addUser }, '+ משתמש')] }),
-    h('section', { class: 'card' }, h('div', { class: 'table-wrap' }, h('table', {},
-      h('thead', {}, h('tr', {}, ['שם', 'אימייל', 'תפקיד', 'סטטוס', ''].map((t) => h('th', { scope: 'col' }, t)))),
+    header({ title: 'ניהול מערכת', sub: 'משתמשים, הרשאות ומצב טכני', actions: [h('button', { class: 'btn primary', type: 'button', onClick: addUser }, '+ משתמש')] }),
+    h('section', { class: 'card' }, h('h2', {}, 'משתמשים'), h('div', { class: 'table-wrap' }, h('table', {},
+      h('thead', {}, h('tr', {}, ['שם', 'אימייל', 'תפקיד', 'סטטוס', 'כניסה אחרונה', 'מחוברים', ''].map((t) => h('th', { scope: 'col' }, t)))),
       h('tbody', {}, users.map((u) => h('tr', {},
-        h('td', {}, u.name), h('td', { dir: 'ltr' }, u.email), h('td', {}, meta.roles[u.role]),
+        h('td', {}, u.name), h('td', { dir: 'ltr' }, u.email), h('td', {}, meta.roles[u.role] || u.role),
         h('td', {}, u.active ? (u.must_change ? h('span', { class: 'pill gold' }, 'ממתין להחלפת סיסמה') : h('span', { class: 'pill ok' }, 'פעיל')) : h('span', { class: 'pill muted' }, 'מושבת')),
-        h('td', {}, h('button', { class: 'btn small ghost', type: 'button', onClick: () => editUser(u) }, 'עריכה')))))))),
-    h('section', { class: 'card' }, h('h2', {}, 'יומן פעולות'),
-      h('div', { class: 'table-wrap' }, h('table', {},
-        h('thead', {}, h('tr', {}, ['מתי', 'מי', 'פעולה', 'על מה'].map((t) => h('th', { scope: 'col' }, t)))),
-        h('tbody', {}, audit.map((a) => h('tr', {},
-          h('td', {}, fmtDateTime(a.at)), h('td', {}, a.user_name || '—'), h('td', {}, ACTIONS[a.action] || a.action),
-          h('td', {}, `${ENTITIES[a.entity] || a.entity}${a.entity_id ? ' #' + a.entity_id : ''}`))))))),
+        h('td', {}, u.last_login ? fmtDateTime(u.last_login) : '—'),
+        h('td', {}, u.sessions),
+        h('td', {}, h('span', { class: 'actions-inline' },
+          h('button', { class: 'btn small ghost', type: 'button', onClick: () => editUser(u) }, 'עריכה'),
+          u.sessions && u.id !== me.id ? h('button', { class: 'btn small ghost', type: 'button', onClick: () => revoke({ user_id: u.id }, `לנתק את ${u.name} מכל המכשירים?`) }, 'ניתוק') : null)))))))),
+    permissionsCard(),
+    h('div', { class: 'row' },
+      h('div', { class: 'wide' },
+        h('section', { class: 'card' }, h('h2', {}, 'מצב המערכת'),
+          h('div', { class: 'kv' },
+            kv('שליחת קודי כניסה במייל', ok(sys.mail.configured)),
+            kv('כתובת שולח', h('span', { dir: 'ltr' }, sys.mail.from)),
+            kv('גרסת מסד נתונים', `${sys.schema.current} / ${sys.schema.latest}`),
+            kv('משתמשים פעילים', sys.counts.users),
+            kv('סשנים פעילים', sys.counts.sessions),
+            kv('לקוחות / תיקים', `${sys.counts.clients} / ${sys.counts.cases}`),
+            kv('משימות / אירועים', `${sys.counts.tasks} / ${sys.counts.events}`)),
+          h('button', { class: 'btn', type: 'button', onClick: () => revoke({ all: true }, 'לנתק את כל המשתמשים (חוץ ממך) מכל המכשירים?') }, 'ניתוק כל המשתמשים'))),
+      h('div', { class: 'narrow' },
+        h('section', { class: 'card' }, h('h2', {}, 'ניסיונות כניסה כושלים (24 שעות)'),
+          sys.loginFailures.length ? sys.loginFailures.map((f) => h('div', { class: 'list-item' },
+            h('div', { class: 'grow' }, h('span', { class: 'title', dir: 'ltr' }, f.email), h('span', { class: 'meta' }, 'אחרון: ' + fmtDateTime(f.last))),
+            h('span', { class: 'pill ' + (f.n >= 5 ? 'danger' : 'gold') }, f.n))) : h('div', { class: 'empty' }, 'אין.')))),
   );
 }
 
@@ -736,14 +882,52 @@ async function viewLogin() {
   if (s.needed) return go('#/setup');
   return authPage(authForm({
     title: 'כניסה למערכת',
-    submit: 'כניסה',
+    submit: 'המשך',
     fields: [
       { name: 'email', label: 'אימייל', type: 'email', autocomplete: 'username', dir: 'ltr' },
       { name: 'password', label: 'סיסמה', type: 'password', autocomplete: 'current-password' },
     ],
-    hint: 'שכחת סיסמה? מנהל המערכת במשרד יכול להגדיר לך סיסמה זמנית.',
-    onSubmit: async (v) => { await api('login', { method: 'POST', body: v }); me = null; go('#/'); },
+    hint: 'אחרי הסיסמה יישלח קוד אימות לאימייל שלך. שכחת סיסמה? מנהל המערכת (IT) יגדיר לך סיסמה זמנית.',
+    onSubmit: async (v) => {
+      const r = await api('login', { method: 'POST', body: v });
+      app.replaceChildren(codeStep(r));
+    },
   }));
+}
+
+function codeStep(ch) {
+  const err = h('div', { class: 'form-error', hidden: true });
+  const input = h('input', { id: 'code', class: 'code-input', inputmode: 'numeric', autocomplete: 'one-time-code', pattern: '[0-9]{6}', maxlength: 6, required: true });
+  const btn = h('button', { class: 'btn primary', type: 'submit' }, 'כניסה');
+  const resend = h('button', { class: 'linkbtn', type: 'button' }, 'שליחת קוד חדש');
+  const form = h('form', { class: 'card' },
+    h('h2', {}, 'אימות דו-שלבי'),
+    h('p', { class: 'sub' }, `שלחנו קוד בן 6 ספרות לכתובת `, h('span', { dir: 'ltr' }, ch.email), `. הקוד בתוקף ${ch.minutes} דקות.`),
+    err,
+    h('div', { class: 'field' }, h('label', { for: 'code' }, 'קוד אימות'), input),
+    h('div', { class: 'form-actions' }, btn, h('a', { class: 'btn ghost', href: '#/login', onClick: (e) => { e.preventDefault(); render(); } }, 'חזרה')),
+    resend);
+  form.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    err.hidden = true;
+    btn.disabled = true;
+    try {
+      await api('login/verify', { method: 'POST', body: { challenge: ch.challenge, code: input.value.trim() } });
+      me = null; meta = null;
+      go('#/');
+    } catch (ex) {
+      err.textContent = ex.message; err.hidden = false;
+      input.value = ''; input.focus();
+    } finally { btn.disabled = false; }
+  });
+  resend.addEventListener('click', async () => {
+    resend.disabled = true;
+    try { await api('login/resend', { method: 'POST', body: { challenge: ch.challenge } }); toast('נשלח קוד חדש'); }
+    catch (ex) { err.textContent = ex.message; err.hidden = false; }
+    finally { setTimeout(() => { resend.disabled = false; }, 30000); }
+  });
+  setTimeout(() => input.focus(), 0);
+  return authPage(form);
 }
 
 async function viewSetup() {
@@ -751,15 +935,15 @@ async function viewSetup() {
   if (!s.needed) return go('#/login');
   return authPage(authForm({
     title: 'הקמת המערכת',
-    submit: 'יצירת משתמש מנהל',
+    submit: 'יצירת משתמש IT',
     fields: [
       { name: 'token', label: 'קוד הקמה (מ-TKB)', type: 'password', autocomplete: 'off', dir: 'ltr' },
       { name: 'name', label: 'שם מלא', autocomplete: 'name' },
-      { name: 'email', label: 'אימייל', type: 'email', autocomplete: 'username', dir: 'ltr' },
-      { name: 'password', label: 'סיסמה (לפחות 10 תווים)', type: 'password', autocomplete: 'new-password', minlength: 10 },
+      { name: 'email', label: 'אימייל (לקודי הכניסה)', type: 'email', autocomplete: 'username', dir: 'ltr' },
+      { name: 'password', label: 'סיסמה (10+ תווים, אותיות וספרות)', type: 'password', autocomplete: 'new-password', minlength: 10 },
     ],
-    hint: s.configured ? 'המשתמש הראשון הוא מנהל המערכת. אחריו מוסיפים את שאר הצוות מתוך המערכת.' : 'קוד ההקמה עוד לא הוגדר בשרת.',
-    onSubmit: async (v) => { await api('setup', { method: 'POST', body: v }); me = null; go('#/'); },
+    hint: s.configured ? 'המשתמש הראשון הוא משתמש IT עם כל ההרשאות. אחריו מוסיפים את שאר הצוות מתוך "ניהול מערכת".' : 'קוד ההקמה עוד לא הוגדר בשרת.',
+    onSubmit: async (v) => { await api('setup', { method: 'POST', body: v }); toast('המשתמש נוצר. עכשיו נכנסים עם קוד במייל.'); go('#/login'); },
   }));
 }
 
@@ -778,7 +962,7 @@ async function render() {
     else if (parts[0] === 'setup') view = await viewSetup();
     else {
       if (!me) {
-        try { me = (await api('me')).user; } catch (e) { if (e.status === 401) return go('#/login'); throw e; }
+        try { me = (await api('me')).user; meta = null; } catch (e) { if (e.status === 401) return go('#/login'); throw e; }
       }
       if (me.must_change) view = authPage(passwordForm(true));
       else {
@@ -791,6 +975,7 @@ async function render() {
         else if (parts[0] === 'calendar') view = await viewCalendar(params);
         else if (parts[0] === 'tasks') view = await viewTasks(params);
         else if (parts[0] === 'users') view = await viewUsers();
+        else if (parts[0] === 'audit') view = await viewAudit();
         else if (parts[0] === 'account') view = viewAccount();
         else view = layout(header({ title: 'הדף לא נמצא' }), h('a', { href: '#/' }, 'חזרה ללוח הבקרה'));
       }
