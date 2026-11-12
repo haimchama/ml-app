@@ -1,0 +1,26 @@
+{
+  // Worker "ml-api": serves the office system (static files in public/) and its API (/api/*)
+  // at https://ml.tkb-pro.com only.
+  "name": "ml-api",
+  "main": "src/worker.js",
+  "compatibility_date": "2026-11-01",
+  "workers_dev": false,
+  "preview_urls": false,
+  "routes": [{ "pattern": "ml.tkb-pro.com", "custom_domain": true }],
+  "assets": {
+    "directory": "./public",
+    "binding": "ASSETS",
+    "not_found_handling": "single-page-application",
+    "run_worker_first": ["/api/*"]
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "ml",
+      // Set by the owner after creating the D1 database "ml".
+      "database_id": "REPLACE_WITH_ML_DATABASE_ID"
+    }
+  ],
+  "observability": { "enabled": true }
+  // Secrets (set in Cloudflare, never in this file): SETUP_TOKEN
+}
