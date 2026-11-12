@@ -3,7 +3,7 @@
 Office management system for the law office of Michael Litvak (ML). Built by TKB.
 The UI is Hebrew, right-to-left. The office name is spelled "ליטווק" (never "ליטבק").
 
-- Stack: one Cloudflare Worker `ml-api` (src/worker.js) serving `public/` as static assets and `/api/*`; D1 database `ml`. No build step.
+- Stack: one Cloudflare Worker `ml-app` (src/worker.js) serving `public/` as static assets and `/api/*`; D1 database `ml`. No build step.
 - Address: https://ml.tkb-pro.com only (`workers_dev` and `preview_urls` stay false). Never touch other TKB Workers, addresses or the DNS of tkb-pro.com.
 - Never run `wrangler login` / `wrangler deploy` against the studio account. Deploys happen by pushing to `release`.
 - Migrations in src/db.js are append-only. Never edit a deployed migration.

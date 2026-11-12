@@ -1,7 +1,7 @@
 {
-  // Worker "ml-api": serves the office system (static files in public/) and its API (/api/*)
+  // Worker "ml-app": serves the office system (static files in public/) and its API (/api/*)
   // at https://ml.tkb-pro.com only.
-  "name": "ml-api",
+  "name": "ml-app",
   "main": "src/worker.js",
   "compatibility_date": "2026-11-01",
   "workers_dev": false,

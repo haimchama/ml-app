@@ -8,7 +8,7 @@
 | נתיב | מה זה |
 |---|---|
 | `public/` | הממשק: HTML/CSS/JS בלי שלב build, פונטים מקומיים (בלי בקשות לשרתים חיצוניים) |
-| `src/worker.js` | ה-API ‏(`/api/*`) ב-Cloudflare Worker בשם `ml-api` |
+| `src/worker.js` | ה-API ‏(`/api/*`) ב-Cloudflare Worker בשם `ml-app` |
 | `src/db.js` | מיגרציות D1 (append-only, רצות לבד בבקשה הראשונה) |
 | `src/lib.js` | ולידציה, תבניות תהליכים, הצפנת סיסמאות (PBKDF2) |
 | `tests/` | `npm test` |
@@ -37,7 +37,7 @@ npm test
 ## הקמה ב-Cloudflare (פעם אחת, הבעלים)
 
 1. D1 בשם `ml` (ה-`database_id` כבר ב-`wrangler.jsonc`).
-2. לחבר את הריפו ל-Workers Builds כ-Worker בשם `ml-api`: production branch `release`, build `npm ci && npm test`, deploy `npx wrangler deploy`.
+2. לחבר את הריפו ל-Workers Builds כ-Worker בשם `ml-app`: production branch `release`, build `npm ci && npm test`, deploy `npx wrangler deploy`.
 3. להגדיר secret בשם `SETUP_TOKEN` (קוד חד-פעמי להקמת משתמש ה-IT הראשון).
 4. הכתובת `ml.tkb-pro.com` מוגדרת ב-`wrangler.jsonc` כ-custom domain ונוצרת בפריסה הראשונה.
 5. **שליחת מיילים (חובה לכניסה):** ב-Cloudflare → Email Service → Email Sending, להוסיף את הדומיין `ml.tkb-pro.com` (או `npx wrangler email sending enable ml.tkb-pro.com`). זה מוסיף רשומות DNS רק לתת-הדומיין `ml`, לא ל-tkb-pro.com עצמו. הכתובת השולחת: `no-reply@ml.tkb-pro.com` (המשתנה `MAIL_FROM`).
