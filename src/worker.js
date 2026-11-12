@@ -1,5 +1,8 @@
 import { migrate, MIGRATIONS } from './db.js';
 import {
+  gmailConfig, setSetting, authUrl, redirectUri, exchangeCode, profileEmail, revoke, syncGmail,
+} from './gmail.js';
+import {
   ValidationError, ROLES, PERMISSIONS, APPROVAL, LEAD_STAGES, EVENT_KINDS, PROCESSES,
   can, permsOf, initialApproval,
   str, email, username, date, time, oneOf, id, bool, checkPassword,
@@ -60,6 +63,14 @@ export default {
       console.error(e);
       return json({ error: 'שגיאת שרת. נסו שוב.' }, 500);
     }
+  },
+
+  // Every 5 minutes (wrangler.jsonc "triggers"): bring in new e-mails from clients.
+  async scheduled(event, env, ctx) {
+    ctx.waitUntil((async () => {
+      await migrate(env.DB);
+      try { await syncGmail(env); } catch (e) { console.error('gmail sync', e && e.message); }
+    })());
   },
 };
 
@@ -196,6 +207,9 @@ async function route(request, env, url) {
   if (res === 'login' && method === 'POST' && rid === 'verify') return verifyCode(request, env);
   if (res === 'login' && method === 'POST' && rid === 'resend') return resendCode(request, env, url);
   if (res === 'logout' && method === 'POST') return logout(request, env);
+  // Google sends the browser back here; SameSite=Strict cookies are not sent on that hop,
+  // so the one-time state (made by an IT user, 10 minutes) is what authorises it.
+  if (res === 'gmail' && rid === 'callback' && method === 'GET') return gmailCallback(env, url);
 
   const user = await currentUser(request, env);
   if (!user) throw new HttpError(401, 'יש להתחבר');
@@ -242,6 +256,15 @@ async function route(request, env, url) {
   if (res === 'audit' && method === 'GET') return listAudit(env, user);
   if (res === 'system' && method === 'GET') return systemStatus(env, user);
   if (res === 'system' && rid === 'revoke' && method === 'POST') return revokeSessions(request, env, user);
+  if (res === 'notifications' && method === 'GET') return listNotifications(env, user);
+  if (res === 'notifications' && rid === 'read' && method === 'POST') return readNotifications(request, env, user);
+  if (res === 'emails' && method === 'GET' && !rid) return listEmails(env, url);
+  if (res === 'emails' && method === 'GET' && rid) return getEmail(env, user, id(rid, 'מייל'));
+  if (res === 'gmail' && !rid && method === 'GET') return gmailStatus(env, url, user);
+  if (res === 'gmail' && rid === 'config' && method === 'POST') return gmailSaveConfig(request, env, user);
+  if (res === 'gmail' && rid === 'connect' && method === 'POST') return gmailConnect(env, url, user);
+  if (res === 'gmail' && rid === 'sync' && method === 'POST') return gmailSyncNow(env, user);
+  if (res === 'gmail' && rid === 'disconnect' && method === 'POST') return gmailDisconnect(env, user);
   if (res === 'system' && rid === '2fa' && !sub && method === 'POST') return start2fa(request, env, url, user);
   if (res === 'system' && rid === '2fa' && sub === 'confirm' && method === 'POST') return confirm2fa(request, env, user);
 
@@ -1025,4 +1048,153 @@ async function confirm2fa(request, env, user) {
   ]);
   await audit(env, user, 'update', 'setting', null, 'require_2fa=1');
   return json({ ok: true, enabled: true });
+}
+
+// ---------- notifications & e-mails ----------
+
+async function listNotifications(env, user) {
+  const [list, count] = await env.DB.batch([
+    env.DB.prepare(
+      `SELECT n.id, n.kind, n.title, n.body, n.link, n.email_id, n.read_at, n.created_at, e.from_email, e.snippet, c.name AS client_name, e.client_id
+       FROM notifications n LEFT JOIN emails e ON e.id = n.email_id LEFT JOIN clients c ON c.id = e.client_id
+       WHERE n.user_id = ? ORDER BY n.id DESC LIMIT 60`
+    ).bind(user.id),
+    env.DB.prepare('SELECT COUNT(*) AS n FROM notifications WHERE user_id = ? AND read_at IS NULL').bind(user.id),
+  ]);
+  return json({ notifications: list.results, unread: count.results[0].n });
+}
+
+async function readNotifications(request, env, user) {
+  const data = await body(request);
+  if (data.all === true) {
+    await env.DB.prepare(`UPDATE notifications SET read_at = datetime('now') WHERE user_id = ? AND read_at IS NULL`).bind(user.id).run();
+  } else {
+    const nid = id(data.id, 'התראה');
+    await env.DB.prepare(`UPDATE notifications SET read_at = datetime('now') WHERE id = ? AND user_id = ?`).bind(nid, user.id).run();
+  }
+  return json({ ok: true });
+}
+
+async function listEmails(env, url) {
+  const clientId = id(url.searchParams.get('client_id'), 'לקוח', { required: false });
+  const caseId = id(url.searchParams.get('case_id'), 'תיק', { required: false });
+  const where = [];
+  const vals = [];
+  if (clientId) { where.push('e.client_id = ?'); vals.push(clientId); }
+  if (caseId) { where.push('e.case_id = ?'); vals.push(caseId); }
+  const { results } = await env.DB.prepare(
+    `SELECT e.id, e.client_id, e.case_id, e.from_email, e.from_name, e.subject, e.snippet, e.received_at, c.name AS client_name
+     FROM emails e LEFT JOIN clients c ON c.id = e.client_id
+     ${where.length ? 'WHERE ' + where.join(' AND ') : ''} ORDER BY e.received_at DESC LIMIT 200`
+  ).bind(...vals).all();
+  return json({ emails: results });
+}
+
+async function getEmail(env, user, emailId) {
+  const e = await env.DB.prepare(
+    `SELECT e.*, c.name AS client_name, k.title AS case_title FROM emails e LEFT JOIN clients c ON c.id = e.client_id
+     LEFT JOIN cases k ON k.id = e.case_id WHERE e.id = ?`
+  ).bind(emailId).first();
+  if (!e) throw new HttpError(404, 'מייל לא נמצא');
+  await env.DB.prepare(`UPDATE notifications SET read_at = datetime('now') WHERE email_id = ? AND user_id = ? AND read_at IS NULL`).bind(emailId, user.id).run();
+  let attachments = [];
+  try { attachments = JSON.parse(e.attachments || '[]'); } catch { /* ignore */ }
+  return json({ email: { ...e, attachments } });
+}
+
+// ---------- Gmail admin (IT) ----------
+
+async function gmailStatus(env, url, user) {
+  requirePerm(user, 'system.view');
+  const cfg = await gmailConfig(env);
+  const count = await env.DB.prepare('SELECT COUNT(*) AS n FROM emails').first();
+  return json({
+    hasClient: Boolean(cfg.clientId && cfg.clientSecret),
+    clientId: cfg.clientId,
+    connected: Boolean(cfg.refreshToken),
+    account: cfg.account,
+    connectedAt: cfg.connectedAt,
+    lastRun: cfg.lastRun,
+    lastError: cfg.lastError,
+    redirectUri: redirectUri(url.origin),
+    emails: count.n,
+  });
+}
+
+async function gmailSaveConfig(request, env, user) {
+  requirePerm(user, 'system.view');
+  const data = await body(request);
+  const clientId = str(data.client_id, 'Client ID', { required: true, max: 200 });
+  const clientSecret = str(data.client_secret, 'Client secret', { required: true, max: 200 });
+  if (!/^[\w.-]+\.apps\.googleusercontent\.com$/.test(clientId)) throw new ValidationError('Client ID צריך להסתיים ב-.apps.googleusercontent.com');
+  await env.DB.batch([
+    setSetting(env.DB, 'gmail_client_id', clientId, user.id),
+    setSetting(env.DB, 'gmail_client_secret', clientSecret, user.id),
+  ]);
+  await audit(env, user, 'update', 'setting', null, 'gmail client');
+  return json({ ok: true });
+}
+
+async function gmailConnect(env, url, user) {
+  requirePerm(user, 'system.view');
+  const cfg = await gmailConfig(env);
+  if (!cfg.clientId || !cfg.clientSecret) throw new ValidationError('קודם שומרים Client ID ו-Client secret');
+  const state = randomToken(24);
+  await env.DB.batch([
+    setSetting(env.DB, 'gmail_oauth_state', `${await sha256(state)}|${Date.now() + 10 * 60 * 1000}|${user.id}`, user.id),
+  ]);
+  return json({ url: authUrl(cfg.clientId, redirectUri(url.origin), state) });
+}
+
+function redirectHome(status) {
+  return new Response(null, { status: 302, headers: { Location: `/#/users?gmail=${encodeURIComponent(status)}`, ...SECURITY_HEADERS } });
+}
+
+async function gmailCallback(env, url) {
+  const state = url.searchParams.get('state') || '';
+  const code = url.searchParams.get('code') || '';
+  const stored = await env.DB.prepare(`SELECT value FROM settings WHERE key = 'gmail_oauth_state'`).first();
+  await env.DB.prepare(`DELETE FROM settings WHERE key = 'gmail_oauth_state'`).run(); // single use
+  if (!stored) return redirectHome('expired');
+  const [hash, expires, userId] = stored.value.split('|');
+  if (!state || Date.now() > Number(expires) || !timingSafeEqual(await sha256(state), hash)) return redirectHome('expired');
+  if (url.searchParams.get('error') || !code) return redirectHome('denied');
+  const cfg = await gmailConfig(env);
+  try {
+    const tokens = await exchangeCode(env, cfg, code, redirectUri(url.origin));
+    if (!tokens.refresh_token) return redirectHome('no_refresh');
+    if (!String(tokens.scope || '').includes('gmail.readonly')) return redirectHome('scope');
+    const account = await profileEmail(env, tokens.access_token);
+    await env.DB.batch([
+      setSetting(env.DB, 'gmail_refresh_token', tokens.refresh_token, Number(userId) || null),
+      setSetting(env.DB, 'gmail_account', account, Number(userId) || null),
+      setSetting(env.DB, 'gmail_connected_at', new Date().toISOString(), Number(userId) || null),
+      setSetting(env.DB, 'gmail_last_sync', String(Date.now()), Number(userId) || null),
+      setSetting(env.DB, 'gmail_last_error', null),
+    ]);
+    await audit(env, { id: Number(userId) || null }, 'connect', 'gmail', null, account);
+    return redirectHome('connected');
+  } catch (e) {
+    console.error('gmail callback', e && e.message);
+    return redirectHome('failed');
+  }
+}
+
+async function gmailSyncNow(env, user) {
+  requirePerm(user, 'system.view');
+  try {
+    const r = await syncGmail(env);
+    return json({ ok: true, ...r });
+  } catch (e) {
+    throw new HttpError(502, e.message);
+  }
+}
+
+async function gmailDisconnect(env, user) {
+  requirePerm(user, 'system.view');
+  const cfg = await gmailConfig(env);
+  if (cfg.refreshToken) await revoke(env, cfg.refreshToken);
+  await env.DB.batch(['gmail_refresh_token', 'gmail_account', 'gmail_connected_at', 'gmail_last_error'].map((k) => setSetting(env.DB, k, null)));
+  await audit(env, user, 'disconnect', 'gmail', null, cfg.account);
+  return json({ ok: true });
 }

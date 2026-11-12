@@ -11,6 +11,7 @@ The UI is Hebrew, right-to-left. The office name is spelled "ליטווק" (neve
 - 2FA (6-digit code e-mailed through the `EMAIL` send_email binding) is a setting IT switches on in the app (`settings.require_2fa`). Enabling it must stay behind a confirmed test code, so a broken mail setup can't lock the office out. `DEV_MAIL_LOG` is for local dev only.
 - An empty database gets a first IT user automatically (`BOOTSTRAP_IT` in src/worker.js), who must change the password at first login.
 - Users log in with an English username (`users.username`, see `username()` in lib.js); the e-mail is only for 2FA codes.
+- Gmail (src/gmail.js): read-only OAuth set up by IT in the app; a cron every 5 minutes stores only mail from known client addresses (others: id only). `GMAIL_API_BASE` / `GOOGLE_TOKEN_URL` / `GOOGLE_REVOKE_URL` exist for local tests against a mock and must never be set in Cloudflare.
 - Roles: it (everything), lawyer, secretary. Permissions live in `src/lib.js` (`can()`); check them on the server for every protected action, the UI only hides buttons.
 - No secrets in the repository (`.dev.vars` is git-ignored). Optional secret: SETUP_TOKEN (not needed while the IT user is created automatically).
 - Before pushing: `npm test` and `node --check` on src/worker.js and public/app.js.

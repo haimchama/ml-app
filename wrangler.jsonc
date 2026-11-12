@@ -25,6 +25,8 @@
   // The sending domain must be onboarded once by the owner (see README).
   "send_email": [{ "name": "EMAIL" }],
   "vars": { "MAIL_FROM": "no-reply@ml.tkb-pro.com" },
+  // Gmail sync: every 5 minutes.
+  "triggers": { "crons": ["*/5 * * * *"] },
   "observability": { "enabled": true }
   // Secrets (set in Cloudflare, never in this file): SETUP_TOKEN
 }

@@ -137,6 +137,43 @@ export const MIGRATIONS = [
      WHERE EXISTS (SELECT 1 FROM users u2 WHERE u2.username = users.username AND u2.id < users.id)`,
     `CREATE UNIQUE INDEX users_username ON users(username)`,
   ],
+  // 4: Gmail – client e-mails, notifications, seen ids
+  [
+    `CREATE TABLE emails (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      gmail_id TEXT NOT NULL UNIQUE,
+      thread_id TEXT NOT NULL DEFAULT '',
+      client_id INTEGER REFERENCES clients(id),
+      case_id INTEGER REFERENCES cases(id),
+      from_email TEXT NOT NULL,
+      from_name TEXT NOT NULL DEFAULT '',
+      subject TEXT NOT NULL DEFAULT '',
+      snippet TEXT NOT NULL DEFAULT '',
+      body TEXT NOT NULL DEFAULT '',
+      attachments TEXT NOT NULL DEFAULT '[]',
+      received_at TEXT NOT NULL,
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    )`,
+    `CREATE INDEX emails_client ON emails(client_id, received_at)`,
+    `CREATE INDEX emails_case ON emails(case_id, received_at)`,
+    `CREATE TABLE notifications (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id INTEGER NOT NULL REFERENCES users(id),
+      kind TEXT NOT NULL,
+      title TEXT NOT NULL,
+      body TEXT NOT NULL DEFAULT '',
+      link TEXT NOT NULL DEFAULT '',
+      email_id INTEGER REFERENCES emails(id),
+      read_at TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    )`,
+    `CREATE INDEX notifications_user ON notifications(user_id, read_at, id)`,
+    `CREATE TABLE gmail_seen (
+      gmail_id TEXT PRIMARY KEY,
+      at TEXT NOT NULL DEFAULT (datetime('now'))
+    )`,
+    `ALTER TABLE tasks ADD COLUMN email_id INTEGER REFERENCES emails(id)`,
+  ],
 ];
 
 let migrated = false;

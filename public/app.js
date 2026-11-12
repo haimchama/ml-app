@@ -4,6 +4,7 @@
 const app = document.getElementById('app');
 let me = null;
 let meta = null;
+let unread = 0;
 
 // ---------- utilities ----------
 
@@ -329,20 +330,22 @@ const NAV_ICONS = {
   menu: ['M4 7h16', 'M4 12h16', 'M4 17h16'],
   close: ['M6 6l12 12', 'M18 6L6 18'],
   chevron: ['M15 6l-6 6 6 6'],
+  bell: ['M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9', 'M10.3 21a1.9 1.9 0 0 0 3.4 0'],
 };
 
 function navGroups() {
   const groups = [
     [
       { href: '#/', label: 'לוח בקרה', icon: 'home', tone: 'navy', match: /^#\/?$/ },
+      { href: '#/inbox', label: 'התראות', icon: 'bell', tone: 'gold', match: /^#\/inbox/, badge: () => unread },
       { href: '#/clients', label: 'לקוחות ולידים', icon: 'clients', tone: 'blue', match: /^#\/clients/ },
       { href: '#/cases', label: 'תיקים', icon: 'cases', tone: 'gold', match: /^#\/cases/ },
       { href: '#/calendar', label: 'יומן ומועדים', icon: 'calendar', tone: 'red', match: /^#\/calendar/ },
       { href: '#/tasks', label: 'משימות', icon: 'tasks', tone: 'green', match: /^#\/tasks/ },
+      { href: '#/emails', label: 'מיילים מלקוחות', icon: 'mail', tone: 'blue', match: /^#\/emails/ },
     ],
     [
       { label: 'מסמכים', icon: 'docs', tone: 'gray', soon: true },
-      { label: 'מיילים', icon: 'mail', tone: 'gray', soon: true },
       { label: 'שעות וחיוב', icon: 'billing', tone: 'gray', soon: true },
     ],
   ];
@@ -357,8 +360,10 @@ function navItem(n, hash) {
   const inner = [h('span', { class: 'nav-icon tone-' + n.tone, 'aria-hidden': 'true' }, icon(NAV_ICONS[n.icon], 17)), h('span', { class: 'nav-label' }, n.label)];
   if (n.soon) return h('span', { class: 'nav-item disabled' }, inner, h('span', { class: 'soon' }, 'בקרוב'));
   const active = n.match.test(hash);
+  const count = n.badge ? n.badge() : 0;
   return h('a', { href: n.href, class: 'nav-item' + (active ? ' active' : ''), 'aria-current': active ? 'page' : null, onClick: closeDrawer },
-    inner, h('span', { class: 'nav-chevron', 'aria-hidden': 'true' }, icon(NAV_ICONS.chevron, 16)));
+    inner, count ? h('span', { class: 'badge', 'aria-label': `${count} חדשות` }, count > 99 ? '99+' : count) : null,
+    h('span', { class: 'nav-chevron', 'aria-hidden': 'true' }, icon(NAV_ICONS.chevron, 16)));
 }
 
 function openDrawer() {
@@ -370,7 +375,7 @@ function closeDrawer() { document.body.classList.remove('drawer-open'); }
 document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeDrawer(); });
 
 const PAGE_TITLES = [[/^#\/?$/, 'לוח בקרה'], [/^#\/clients/, 'לקוחות ולידים'], [/^#\/cases/, 'תיקים'], [/^#\/calendar/, 'יומן ומועדים'],
-  [/^#\/tasks/, 'משימות'], [/^#\/audit/, 'יומן פעולות'], [/^#\/users/, 'ניהול מערכת'], [/^#\/account/, 'החשבון שלי']];
+  [/^#\/tasks/, 'משימות'], [/^#\/inbox/, 'התראות'], [/^#\/emails/, 'מיילים מלקוחות'], [/^#\/audit/, 'יומן פעולות'], [/^#\/users/, 'ניהול מערכת'], [/^#\/account/, 'החשבון שלי']];
 
 function layout(...content) {
   const hash = location.hash || '#/';
@@ -381,7 +386,8 @@ function layout(...content) {
     h('header', { class: 'topbar' },
       h('button', { class: 'topbar-btn', type: 'button', 'aria-label': 'פתיחת התפריט', onClick: openDrawer }, icon(NAV_ICONS.menu, 22)),
       h('div', { class: 'topbar-title' }, title),
-      h('a', { class: 'topbar-logo', href: '#/', 'aria-label': 'לוח בקרה' }, h('img', { src: '/logo.png', alt: '' }))),
+      h('a', { class: 'topbar-btn topbar-bell', href: '#/inbox', 'aria-label': unread ? `התראות, ${unread} חדשות` : 'התראות' },
+        icon(NAV_ICONS.bell, 22), unread ? h('span', { class: 'badge dot' }, unread > 99 ? '99+' : unread) : null)),
     h('div', { class: 'scrim', 'aria-hidden': 'true', onClick: closeDrawer }),
     h('aside', { class: 'side', id: 'drawer', 'aria-label': 'תפריט' },
       h('div', { class: 'drawer-head' },
@@ -591,7 +597,7 @@ async function viewClients(params) {
 }
 
 async function viewClient(clientId) {
-  const { client: c, cases } = await api('clients/' + clientId);
+  const [{ client: c, cases }, { emails }] = await Promise.all([api('clients/' + clientId), api('emails?client_id=' + encodeURIComponent(clientId))]);
   const refresh = () => render();
   const stageSelect = h('select', { 'aria-label': 'שלב הליד', class: 'btn small ghost' },
     meta.leadStages.filter((s) => s.key !== 'signed' || c.approval === 'approved').map((s) => h('option', { value: s.key, selected: s.key === c.stage }, s.label)));
@@ -621,6 +627,7 @@ async function viewClient(clientId) {
       h('div', { class: 'wide' },
         h('section', { class: 'card' }, h('h2', {}, 'תיקים'),
           cases.length ? casesTable(cases.map((x) => ({ ...x, client_name: c.name }))) : h('div', { class: 'empty' }, c.approval === 'approved' ? 'אין תיקים. פתיחת תיק הופכת ליד ללקוח.' : 'אין תיקים.')),
+        emailsCard(emails, c.email ? 'מיילים שיתקבלו מ-' + c.email + ' יופיעו כאן.' : 'כדי שמיילים של הלקוח ייקלטו, צריך למלא לו כתובת אימייל.'),
         c.notes ? h('section', { class: 'card' }, h('h2', {}, 'הערות'), h('div', { class: 'note' }, h('div', { class: 'text' }, c.notes))) : null),
       h('div', { class: 'narrow' },
         h('section', { class: 'card' }, h('h2', {}, 'פרטי קשר'),
@@ -663,7 +670,7 @@ async function viewCases(params) {
 }
 
 async function viewCase(caseId) {
-  const { case: c, process: p, tasks, events, notes } = await api('cases/' + caseId);
+  const [{ case: c, process: p, tasks, events, notes }, { emails }] = await Promise.all([api('cases/' + caseId), api('emails?case_id=' + encodeURIComponent(caseId))]);
   const refresh = () => render();
   const setStep = async (i) => {
     if (i === c.step) return;
@@ -710,10 +717,11 @@ async function viewCase(caseId) {
           h('div', { class: 'card-head' }, h('h2', {}, 'משימות'), h('button', { class: 'btn small', type: 'button', onClick: () => taskForm({ caseId: c.id }, refresh) }, '+ משימה')),
           openTasks.length ? openTasks.map((t) => taskRow(t, meta.today, refresh)) : h('div', { class: 'empty' }, 'אין משימות פתוחות.'),
           doneTasks.length ? h('details', {}, h('summary', {}, `בוצעו (${doneTasks.length})`), doneTasks.map((t) => taskRow(t, meta.today, refresh))) : null),
+        emails.length ? emailsCard(emails, '') : null,
         h('section', { class: 'card' },
           h('h2', {}, 'הערות ופעילות'),
           h('form', { class: 'inline-form', onSubmit: addNote }, noteInput, h('button', { class: 'btn primary', type: 'submit' }, 'הוספה')),
-          notes.length ? notes.map((n) => h('div', { class: 'note' }, h('span', { class: 'meta' }, `${n.user_name || ''} · ${fmtDateTime(n.created_at)}`), h('div', { class: 'text' }, n.text)))
+          notes.length ? notes.map((n) => h('div', { class: 'note' }, h('span', { class: 'meta' }, `${n.user_name || 'מערכת'} · ${fmtDateTime(n.created_at)}`), h('div', { class: 'text' }, n.text)))
             : h('div', { class: 'empty' }, 'עוד אין הערות.'))),
       h('div', { class: 'narrow' },
         h('section', { class: 'card' },
@@ -793,9 +801,125 @@ async function viewTasks(params) {
   );
 }
 
-const AUDIT_ACTIONS = { login: 'כניסה', setup: 'הקמת המערכת', create: 'יצירה', update: 'עדכון', delete: 'מחיקה', step: 'מעבר שלב',
+function emailItem(e, showClient) {
+  return h('a', { class: 'list-item email-item', href: '#/emails/' + e.id },
+    h('span', { class: 'nav-icon tone-blue', 'aria-hidden': 'true' }, icon(NAV_ICONS.mail, 17)),
+    h('div', { class: 'grow' },
+      h('span', { class: 'title' }, e.subject || '(ללא נושא)'),
+      h('span', { class: 'meta' }, [showClient ? e.client_name : null, fmtDateTime(e.received_at)].filter(Boolean).join(' · ')),
+      e.snippet ? h('span', { class: 'meta snippet' }, e.snippet) : null));
+}
+
+function emailsCard(emails, emptyText) {
+  return h('section', { class: 'card' },
+    h('div', { class: 'card-head' }, h('h2', {}, 'מיילים'), emails.length ? h('span', { class: 'meta' }, `${emails.length}`) : null),
+    emails.length ? emails.slice(0, 10).map((e) => emailItem(e, false)) : h('div', { class: 'empty' }, emptyText));
+}
+
+async function viewInbox() {
+  const { notifications } = await api('notifications');
+  const markAll = async () => { try { await api('notifications/read', { method: 'POST', body: { all: true } }); render(); } catch (e) { toast(e.message, true); } };
+  return layout(
+    header({ title: 'התראות', actions: unread ? [h('button', { class: 'btn', type: 'button', onClick: markAll }, 'סימון הכל כנקרא')] : null }),
+    h('section', { class: 'card' }, notifications.length ? notifications.map((n) => h('a', { class: 'list-item notif' + (n.read_at ? '' : ' unread'), href: n.link || '#/inbox',
+      onClick: () => { if (!n.read_at) api('notifications/read', { method: 'POST', body: { id: n.id } }).catch(() => {}); } },
+      h('span', { class: 'nav-icon tone-' + (n.kind === 'email' ? 'blue' : 'gold'), 'aria-hidden': 'true' }, icon(n.kind === 'email' ? NAV_ICONS.mail : NAV_ICONS.bell, 17)),
+      h('div', { class: 'grow' },
+        h('span', { class: 'title' }, n.title),
+        h('span', { class: 'meta' }, [n.body, fmtDateTime(n.created_at)].filter(Boolean).join(' · ')),
+        n.snippet ? h('span', { class: 'meta snippet' }, n.snippet) : null),
+      n.read_at ? null : h('span', { class: 'unread-dot', 'aria-label': 'חדש' })))
+      : h('div', { class: 'empty' }, 'אין התראות. כשלקוח שמופיע במערכת ישלח מייל לתיבה המחוברת, זה יופיע כאן.')),
+  );
+}
+
+async function viewEmails() {
+  const { emails } = await api('emails');
+  return layout(
+    header({ title: 'מיילים מלקוחות', sub: 'מיילים שהגיעו לתיבת ה-Gmail המחוברת מלקוחות שמופיעים במערכת' }),
+    h('section', { class: 'card' }, emails.length ? emails.map((e) => emailItem(e, true)) : h('div', { class: 'empty' }, 'עוד לא התקבלו מיילים מלקוחות.')),
+  );
+}
+
+async function viewEmail(emailId) {
+  const { email: e } = await api('emails/' + emailId);
+  try { unread = (await api('notifications')).unread; } catch { /* ignore */ }
+  const gmailLink = 'https://mail.google.com/mail/u/0/#all/' + encodeURIComponent(e.gmail_id);
+  return layout(
+    header({
+      eyebrow: 'מייל מלקוח',
+      title: e.subject || '(ללא נושא)',
+      sub: `${e.from_name ? e.from_name + ' · ' : ''}${e.from_email} · ${fmtDateTime(e.received_at)}`,
+      actions: [
+        e.client_id ? h('a', { class: 'btn ghost', href: '#/clients/' + e.client_id }, 'כרטיס לקוח') : null,
+        e.case_id ? h('a', { class: 'btn ghost', href: '#/cases/' + e.case_id }, 'לתיק') : null,
+        h('a', { class: 'btn', href: gmailLink, target: '_blank', rel: 'noopener noreferrer' }, 'פתיחה ב-Gmail'),
+      ],
+    }),
+    h('section', { class: 'card' },
+      h('div', { class: 'kv' },
+        kv('לקוח', e.client_id ? h('a', { href: '#/clients/' + e.client_id }, e.client_name) : '—'),
+        kv('תיק', e.case_id ? h('a', { href: '#/cases/' + e.case_id }, e.case_title) : 'לא משויך לתיק פתוח'),
+        e.attachments.length ? kv('קבצים מצורפים', e.attachments.join(', ')) : null)),
+    h('section', { class: 'card' }, h('div', { class: 'email-body', dir: 'auto' }, e.body || e.snippet || '(אין תוכן טקסט)')),
+  );
+}
+
+async function gmailCard() {
+  let g;
+  try { g = await api('gmail'); } catch (e) { return h('section', { class: 'card' }, h('h2', {}, 'חיבור Gmail'), h('div', { class: 'form-error' }, e.message)); }
+  const refresh = () => render();
+  const configure = () => openForm({
+    title: 'פרטי החיבור מ-Google Cloud',
+    fields: [
+      { name: 'client_id', label: 'Client ID', required: true, value: g.clientId, dir: 'ltr', full: true },
+      { name: 'client_secret', label: 'Client secret', type: 'password', required: true, dir: 'ltr', full: true, autocomplete: 'off' },
+    ],
+    onSubmit: async (v) => { await api('gmail/config', { method: 'POST', body: v }); toast('נשמר'); refresh(); },
+  });
+  const connect = async () => {
+    try { const r = await api('gmail/connect', { method: 'POST', body: {} }); location.href = r.url; } catch (e) { toast(e.message, true); }
+  };
+  const sync = async (btn) => {
+    btn.disabled = true;
+    try { const r = await api('gmail/sync', { method: 'POST', body: {} }); toast(r.stored ? `נקלטו ${r.stored} מיילים מלקוחות` : `נבדקו ${r.checked} מיילים חדשים, אין מלקוחות`); refresh(); }
+    catch (e) { toast(e.message, true); } finally { btn.disabled = false; }
+  };
+  const disconnect = async () => {
+    if (!confirm('לנתק את תיבת ה-Gmail? המיילים שכבר נקלטו יישארו במערכת.')) return;
+    try { await api('gmail/disconnect', { method: 'POST', body: {} }); toast('נותק'); refresh(); } catch (e) { toast(e.message, true); }
+  };
+  const syncBtn = h('button', { class: 'btn', type: 'button' }, 'בדיקה עכשיו');
+  syncBtn.addEventListener('click', () => sync(syncBtn));
+  const steps = h('details', { class: 'howto' }, h('summary', {}, 'איך מקבלים Client ID ו-Client secret'),
+    h('ol', {},
+      h('li', {}, 'נכנסים ל-console.cloud.google.com ויוצרים פרויקט (למשל "ML Office").'),
+      h('li', {}, 'APIs & Services ← Library ← מפעילים את Gmail API.'),
+      h('li', {}, 'OAuth consent screen: בוחרים External (או Internal ב-Workspace), ממלאים שם ואימייל, מוסיפים את ה-scope gmail.readonly, וב-Test users מוסיפים את כתובת ה-Gmail של המשרד.'),
+      h('li', {}, 'Credentials ← Create credentials ← OAuth client ID ← Web application.'),
+      h('li', {}, h('span', {}, 'ב-Authorized redirect URIs מוסיפים בדיוק: '), h('code', { dir: 'ltr' }, g.redirectUri)),
+      h('li', {}, 'מעתיקים את ה-Client ID וה-Client secret לכאן, ואז "חיבור Gmail".')),
+    h('p', { class: 'sub' }, 'בחשבון Gmail פרטי, כל עוד האפליקציה במצב Testing אצל Google, החיבור פג אחרי 7 ימים וצריך ללחוץ "חיבור מחדש".'));
+  return h('section', { class: 'card' + (g.lastError ? ' approval-banner rejected' : '') },
+    h('div', { class: 'card-head' }, h('h2', {}, 'חיבור Gmail'),
+      h('span', { class: 'pill ' + (g.connected && !g.lastError ? 'ok' : g.connected ? 'danger' : 'muted') }, g.connected ? (g.lastError ? 'שגיאה' : 'מחובר') : 'לא מחובר')),
+    h('p', { class: 'sub' }, 'כל 5 דקות המערכת בודקת את תיבת הדואר הנכנס. מייל מלקוח שהאימייל שלו מופיע במערכת נשמר אצל הלקוח והתיק, נשלחת התראה לעורך הדין האחראי ולמזכירות, ונפתחת משימה לעורך הדין. מיילים אחרים לא נשמרים.'),
+    h('div', { class: 'kv' },
+      kv('תיבה', g.account ? h('span', { dir: 'ltr' }, g.account) : '—'),
+      kv('בדיקה אחרונה', g.lastRun ? fmtDateTime(g.lastRun.replace('T', ' ').slice(0, 19)) : '—'),
+      kv('מיילים שנקלטו', g.emails)),
+    g.lastError ? h('div', { class: 'form-error' }, g.lastError) : null,
+    h('div', { class: 'actions-inline wrap' },
+      h('button', { class: 'btn' + (g.hasClient ? ' ghost' : ' primary'), type: 'button', onClick: configure }, g.hasClient ? 'עדכון פרטי Google' : 'הזנת פרטי Google'),
+      g.hasClient ? h('button', { class: 'btn' + (g.connected && !g.lastError ? ' ghost' : ' primary'), type: 'button', onClick: connect }, g.connected ? 'חיבור מחדש' : 'חיבור Gmail') : null,
+      g.connected ? syncBtn : null,
+      g.connected ? h('button', { class: 'btn ghost', type: 'button', onClick: disconnect }, 'ניתוק') : null),
+    steps);
+}
+
+const AUDIT_ACTIONS = { email: 'התקבל מייל', connect: 'חיבור', disconnect: 'ניתוק', login: 'כניסה', setup: 'הקמת המערכת', create: 'יצירה', update: 'עדכון', delete: 'מחיקה', step: 'מעבר שלב',
   password: 'החלפת סיסמה', approve: 'אישור לקוח', reject: 'דחיית לקוח', close: 'סגירת תיק', reopen: 'פתיחת תיק מחדש', revoke: 'ניתוק סשנים' };
-const AUDIT_ENTITIES = { user: 'משתמש', client: 'לקוח', case: 'תיק', task: 'משימה', event: 'אירוע', session: 'סשן' };
+const AUDIT_ENTITIES = { gmail: 'Gmail', setting: 'הגדרה', user: 'משתמש', client: 'לקוח', case: 'תיק', task: 'משימה', event: 'אירוע', session: 'סשן' };
 const ENTITY_LINK = { client: '#/clients/', case: '#/cases/' };
 
 async function viewAudit() {
@@ -860,7 +984,15 @@ function permissionsCard() {
 
 async function viewUsers() {
   if (!can('users.manage')) return go('#/');
-  const [{ users }, sys] = await Promise.all([api('users'), api('system')]);
+  const [{ users }, sys, gmail] = await Promise.all([api('users'), api('system'), gmailCard()]);
+  const gstatus = new URLSearchParams((location.hash.split('?')[1] || '')).get('gmail');
+  if (gstatus) {
+    const msgs = { connected: ['Gmail חובר בהצלחה', false], denied: ['החיבור בוטל ב-Google', true], expired: ['פג תוקף הבקשה, נסו שוב', true],
+      no_refresh: ['Google לא החזיר הרשאה קבועה. נסו "חיבור מחדש".', true], scope: ['לא ניתנה הרשאת קריאה ל-Gmail', true], failed: ['החיבור נכשל. בדקו את פרטי Google ונסו שוב.', true] };
+    const [m, bad] = msgs[gstatus] || ['', false];
+    if (m) setTimeout(() => toast(m, bad), 50);
+    history.replaceState(null, '', '#/users');
+  }
   const refresh = async () => { meta = await api('meta'); render(); };
   const roleOptions = Object.entries(meta.roles).map(([k, l]) => ({ value: k, label: l }));
   const addUser = () => openForm({
@@ -910,6 +1042,7 @@ async function viewUsers() {
         h('td', {}, h('span', { class: 'actions-inline' },
           h('button', { class: 'btn small ghost', type: 'button', onClick: () => editUser(u) }, 'עריכה'),
           u.sessions && u.id !== me.id ? h('button', { class: 'btn small ghost', type: 'button', onClick: () => revoke({ user_id: u.id }, `לנתק את ${u.name} מכל המכשירים?`) }, 'ניתוק') : null)))))))),
+    gmail,
     permissionsCard(),
     h('div', { class: 'row' },
       h('div', { class: 'wide' },
@@ -1088,6 +1221,7 @@ async function render() {
       if (me.must_change) view = authPage(passwordForm(true));
       else {
         if (!meta) meta = await api('meta');
+        try { unread = (await api('notifications')).unread; } catch { /* keep last */ }
         if (parts.length === 0) view = await viewDashboard();
         else if (parts[0] === 'clients' && parts[1]) view = await viewClient(parts[1]);
         else if (parts[0] === 'clients') view = await viewClients(params);
@@ -1097,6 +1231,9 @@ async function render() {
         else if (parts[0] === 'tasks') view = await viewTasks(params);
         else if (parts[0] === 'users') view = await viewUsers();
         else if (parts[0] === 'audit') view = await viewAudit();
+        else if (parts[0] === 'inbox') view = await viewInbox();
+        else if (parts[0] === 'emails' && parts[1]) view = await viewEmail(parts[1]);
+        else if (parts[0] === 'emails') view = await viewEmails();
         else if (parts[0] === 'account') view = viewAccount();
         else view = layout(header({ title: 'הדף לא נמצא' }), h('a', { href: '#/' }, 'חזרה ללוח הבקרה'));
       }
