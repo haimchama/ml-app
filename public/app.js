@@ -734,6 +734,39 @@ async function viewAudit() {
   );
 }
 
+function twoFactorCard(sys) {
+  const on = sys.twoFactor;
+  const toggle = async () => {
+    if (on) {
+      if (!confirm('לכבות את האימות הדו-שלבי? מעכשיו הכניסה תהיה עם סיסמה בלבד.')) return;
+      try { await api('system/2fa', { method: 'POST', body: { enable: false } }); toast('האימות הדו-שלבי כובה'); render(); }
+      catch (e) { toast(e.message, true); }
+      return;
+    }
+    let ch;
+    try { ch = await api('system/2fa', { method: 'POST', body: { enable: true } }); }
+    catch (e) { toast(e.message, true); return; }
+    openForm({
+      title: 'הפעלת אימות דו-שלבי',
+      submit: 'אישור והפעלה',
+      fields: [{ name: 'code', label: `קוד שנשלח ל-${ch.email} (בתוקף ${ch.minutes} דקות)`, required: true, max: 6, dir: 'ltr', autocomplete: 'one-time-code' }],
+      onSubmit: async (v) => {
+        await api('system/2fa/confirm', { method: 'POST', body: { challenge: ch.challenge, code: v.code.trim() } });
+        toast('האימות הדו-שלבי הופעל לכל המשתמשים');
+        render();
+      },
+    });
+  };
+  return h('section', { class: 'card' + (on ? '' : ' approval-banner rejected') },
+    h('div', { class: 'card-head' },
+      h('h2', {}, 'אימות דו-שלבי במייל'),
+      h('span', { class: 'pill ' + (on ? 'ok' : 'danger') }, on ? 'פעיל' : 'כבוי')),
+    h('p', { class: 'sub' }, on
+      ? 'כל כניסה דורשת סיסמה וגם קוד שנשלח לאימייל של המשתמש.'
+      : 'כרגע נכנסים עם סיסמה בלבד. להפעלה צריך ששליחת המיילים תעבוד: נשלח אליך קוד בדיקה, והאימות יופעל רק אחרי שתזין אותו. ודא שהאימייל של כל משתמש אמיתי.'),
+    h('button', { class: 'btn' + (on ? '' : ' primary'), type: 'button', onClick: toggle }, on ? 'כיבוי' : 'הפעלת אימות דו-שלבי'));
+}
+
 function permissionsCard() {
   const roles = Object.keys(meta.roles);
   const mark = (yes) => (yes ? h('span', { class: 'perm-yes', 'aria-label': 'כן' }, '✓') : h('span', { class: 'perm-no', 'aria-label': 'לא' }, '—'));
@@ -765,15 +798,17 @@ async function viewUsers() {
     title: 'עריכת משתמש – ' + u.name,
     fields: [
       { name: 'name', label: 'שם', required: true, value: u.name, max: 80 },
+      { name: 'email', label: 'אימייל (שם המשתמש, ולשם נשלחים הקודים)', type: 'email', required: true, value: u.email, dir: 'ltr' },
       { name: 'role', label: 'תפקיד', type: 'select', value: u.role, options: roleOptions },
       { name: 'active', label: 'סטטוס', type: 'select', value: u.active ? '1' : '0', options: [{ value: '1', label: 'פעיל' }, { value: '0', label: 'מושבת' }] },
       { name: 'password', label: 'סיסמה זמנית חדשה (ריק = ללא שינוי)', type: 'text', dir: 'ltr' },
     ],
     onSubmit: async (v) => {
-      const body = { name: v.name, role: v.role, active: v.active === '1' };
+      const body = { name: v.name, email: v.email, role: v.role, active: v.active === '1' };
       if (v.password) body.password = v.password;
       await api('users/' + u.id, { method: 'PATCH', body });
       toast('נשמר');
+      if (u.id === me.id) me = null;
       await refresh();
     },
   });
@@ -797,6 +832,7 @@ async function viewUsers() {
     permissionsCard(),
     h('div', { class: 'row' },
       h('div', { class: 'wide' },
+        twoFactorCard(sys),
         h('section', { class: 'card' }, h('h2', {}, 'מצב המערכת'),
           h('div', { class: 'kv' },
             kv('שליחת קודי כניסה במייל', ok(sys.mail.configured)),
@@ -887,9 +923,10 @@ async function viewLogin() {
       { name: 'email', label: 'אימייל', type: 'email', autocomplete: 'username', dir: 'ltr' },
       { name: 'password', label: 'סיסמה', type: 'password', autocomplete: 'current-password' },
     ],
-    hint: 'אחרי הסיסמה יישלח קוד אימות לאימייל שלך. שכחת סיסמה? מנהל המערכת (IT) יגדיר לך סיסמה זמנית.',
+    hint: 'אם האימות הדו-שלבי פעיל, אחרי הסיסמה יישלח קוד לאימייל שלך. שכחת סיסמה? מנהל המערכת (IT) יגדיר לך סיסמה זמנית.',
     onSubmit: async (v) => {
       const r = await api('login', { method: 'POST', body: v });
+      if (!r.challenge) { me = null; meta = null; go('#/'); return; }
       app.replaceChildren(codeStep(r));
     },
   }));

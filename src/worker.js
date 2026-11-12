@@ -18,6 +18,13 @@ const CODE_MAX_SENDS = 3;
 const RESEND_SECONDS = 30;
 const DEFAULT_MAIL_FROM = 'no-reply@ml.tkb-pro.com';
 
+// First IT user, created automatically on an empty database. Must change the password at first login.
+const BOOTSTRAP_IT = {
+  email: 'it@ml.tkb-pro.com',
+  name: 'IT',
+  pass: 'pbkdf2$30000$oOFag0R68x1M4Vsx+v54HQ==$Dt8FjJZ5rVlRE0btcKqO0G7G5OJ46nIgBcebEpnz2Vg=',
+};
+
 const SECURITY_HEADERS = {
   'Cache-Control': 'no-store',
   'X-Content-Type-Options': 'nosniff',
@@ -45,6 +52,7 @@ export default {
     if (!url.pathname.startsWith('/api/')) return env.ASSETS.fetch(request);
     try {
       await migrate(env.DB);
+      await ensureBootstrapUser(env);
       return await route(request, env, url);
     } catch (e) {
       if (e instanceof ValidationError || e instanceof HttpError) return json({ error: e.message }, e.status);
@@ -53,6 +61,26 @@ export default {
     }
   },
 };
+
+let bootstrapped = false;
+async function ensureBootstrapUser(env) {
+  if (bootstrapped) return;
+  const row = await env.DB.prepare('SELECT COUNT(*) AS n FROM users').first();
+  if (row.n === 0) {
+    await env.DB.prepare(`INSERT OR IGNORE INTO users (email, name, role, pass, must_change) VALUES (?, ?, 'it', ?, 1)`)
+      .bind(BOOTSTRAP_IT.email, BOOTSTRAP_IT.name, BOOTSTRAP_IT.pass).run();
+  }
+  bootstrapped = true;
+}
+
+async function getSetting(env, key, fallback = null) {
+  const r = await env.DB.prepare('SELECT value FROM settings WHERE key = ?').bind(key).first();
+  return r ? r.value : fallback;
+}
+
+async function twoFactorRequired(env) {
+  return (await getSetting(env, 'require_2fa', '0')) === '1';
+}
 
 // ---------- request helpers ----------
 
@@ -213,6 +241,8 @@ async function route(request, env, url) {
   if (res === 'audit' && method === 'GET') return listAudit(env, user);
   if (res === 'system' && method === 'GET') return systemStatus(env, user);
   if (res === 'system' && rid === 'revoke' && method === 'POST') return revokeSessions(request, env, user);
+  if (res === 'system' && rid === '2fa' && !sub && method === 'POST') return start2fa(request, env, url, user);
+  if (res === 'system' && rid === '2fa' && sub === 'confirm' && method === 'POST') return confirm2fa(request, env, user);
 
   throw new HttpError(404, 'לא נמצא');
 }
@@ -264,6 +294,11 @@ async function login(request, env, url) {
     await env.DB.prepare('INSERT INTO login_failures (email) VALUES (?)').bind(mail).run();
     throw new HttpError(401, 'אימייל או סיסמה שגויים');
   }
+  if (!(await twoFactorRequired(env))) {
+    await env.DB.prepare('DELETE FROM login_failures WHERE email = ?').bind(mail).run();
+    await audit(env, user, 'login', 'user', user.id, 'password only');
+    return json({ ok: true }, 200, { 'Set-Cookie': await startSession(env, user.id) });
+  }
   const challenge = randomToken();
   const code = randomCode();
   const challengeHash = await sha256(challenge);
@@ -276,13 +311,13 @@ async function login(request, env, url) {
   return json({ challenge, email: maskEmail(user.email), minutes: CODE_MINUTES });
 }
 
-async function loadChallenge(env, challenge) {
+async function loadChallenge(env, challenge, purpose = 'login') {
   const token = str(challenge, 'אתגר', { required: true, max: 100 });
   const hash = await sha256(token);
   const ch = await env.DB.prepare(
     `SELECT c.*, u.email, u.name FROM login_challenges c JOIN users u ON u.id = c.user_id
-     WHERE c.token_hash = ? AND c.expires_at > datetime('now') AND u.active = 1`
-  ).bind(hash).first();
+     WHERE c.token_hash = ? AND c.expires_at > datetime('now') AND u.active = 1 AND c.purpose = ?`
+  ).bind(hash, purpose).first();
   if (!ch) throw new HttpError(401, 'פג תוקף הקוד. התחברו מחדש.');
   return ch;
 }
@@ -406,6 +441,12 @@ async function updateUser(request, env, user, userId) {
   const sets = [];
   const vals = [];
   if (data.name !== undefined) { sets.push('name = ?'); vals.push(str(data.name, 'שם', { required: true, max: 80 })); }
+  if (data.email !== undefined) {
+    const mail = email(data.email, 'אימייל', { required: true });
+    const other = await env.DB.prepare('SELECT id FROM users WHERE email = ? AND id != ?').bind(mail, userId).first();
+    if (other) throw new ValidationError('כבר קיים משתמש עם האימייל הזה');
+    sets.push('email = ?'); vals.push(mail);
+  }
   if (data.role !== undefined) { sets.push('role = ?'); vals.push(oneOf(data.role, 'תפקיד', Object.keys(ROLES))); }
   if (data.active !== undefined) { sets.push('active = ?'); vals.push(bool(data.active) ? 1 : 0); }
   if (data.password !== undefined && data.password !== '') {
@@ -901,6 +942,7 @@ async function systemStatus(env, user) {
     schema: { current: ver.results[0].v, latest: MIGRATIONS.length },
     mail: { configured: mailConfigured(env) && env.DEV_MAIL_LOG !== '1', from: env.MAIL_FROM || DEFAULT_MAIL_FROM },
     setupTokenSet: Boolean(env.SETUP_TOKEN),
+    twoFactor: await twoFactorRequired(env),
     counts: counts.results[0],
     loginFailures: fails.results,
   });
@@ -918,4 +960,58 @@ async function revokeSessions(request, env, user) {
     await audit(env, user, 'revoke', 'session', target);
   }
   return json({ ok: true });
+}
+
+// Turning 2FA on sends a code to the IT user who asks, and switches on only after that code
+// comes back, so a broken mail setup can never lock the office out. Turning it off is immediate.
+async function start2fa(request, env, url, user) {
+  requirePerm(user, 'system.view');
+  const data = await body(request);
+  if (data.enable === false) {
+    await env.DB.prepare(
+      `INSERT INTO settings (key, value, updated_by) VALUES ('require_2fa', '0', ?)
+       ON CONFLICT(key) DO UPDATE SET value = '0', updated_by = excluded.updated_by, updated_at = datetime('now')`
+    ).bind(user.id).run();
+    await audit(env, user, 'update', 'setting', null, 'require_2fa=0');
+    return json({ ok: true, enabled: false });
+  }
+  if (!mailConfigured(env) && env.DEV_MAIL_LOG !== '1') {
+    throw new HttpError(503, 'שליחת מיילים עוד לא הוגדרה בשרת. קודם מגדירים את Email Sending ב-Cloudflare.');
+  }
+  const challenge = randomToken();
+  const code = randomCode();
+  const challengeHash = await sha256(challenge);
+  await env.DB.batch([
+    env.DB.prepare(`DELETE FROM login_challenges WHERE (user_id = ? AND purpose = 'enable_2fa') OR expires_at < datetime('now')`).bind(user.id),
+    env.DB.prepare(`INSERT INTO login_challenges (token_hash, user_id, code_hash, expires_at, purpose) VALUES (?, ?, ?, datetime('now', ?), 'enable_2fa')`)
+      .bind(challengeHash, user.id, await sha256(challengeHash + ':' + code), `+${CODE_MINUTES} minutes`),
+  ]);
+  await sendCode(env, url, user, code);
+  return json({ challenge, email: maskEmail(user.email), minutes: CODE_MINUTES });
+}
+
+async function confirm2fa(request, env, user) {
+  requirePerm(user, 'system.view');
+  const data = await body(request);
+  const ch = await loadChallenge(env, data.challenge, 'enable_2fa');
+  if (ch.user_id !== user.id) throw new HttpError(403, 'קוד לא שייך למשתמש הזה');
+  const code = str(data.code, 'קוד', { required: true, max: 10 }).replace(/\s/g, '');
+  if (ch.attempts >= CODE_MAX_ATTEMPTS) {
+    await env.DB.prepare('DELETE FROM login_challenges WHERE token_hash = ?').bind(ch.token_hash).run();
+    throw new HttpError(401, 'יותר מדי ניסיונות. מתחילים מחדש.');
+  }
+  const ok = /^\d{6}$/.test(code) && timingSafeEqual(await sha256(ch.token_hash + ':' + code), ch.code_hash);
+  if (!ok) {
+    await env.DB.prepare('UPDATE login_challenges SET attempts = attempts + 1 WHERE token_hash = ?').bind(ch.token_hash).run();
+    throw new HttpError(401, 'הקוד שגוי');
+  }
+  await env.DB.batch([
+    env.DB.prepare('DELETE FROM login_challenges WHERE token_hash = ?').bind(ch.token_hash),
+    env.DB.prepare(
+      `INSERT INTO settings (key, value, updated_by) VALUES ('require_2fa', '1', ?)
+       ON CONFLICT(key) DO UPDATE SET value = '1', updated_by = excluded.updated_by, updated_at = datetime('now')`
+    ).bind(user.id),
+  ]);
+  await audit(env, user, 'update', 'setting', null, 'require_2fa=1');
+  return json({ ok: true, enabled: true });
 }

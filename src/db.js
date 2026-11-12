@@ -119,6 +119,16 @@ export const MIGRATIONS = [
       at TEXT NOT NULL DEFAULT (datetime('now'))
     )`,
   ],
+  // 2: system settings (2FA on/off is switched from inside the app by IT)
+  [
+    `CREATE TABLE settings (
+      key TEXT PRIMARY KEY,
+      value TEXT NOT NULL,
+      updated_by INTEGER REFERENCES users(id),
+      updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+    )`,
+    `ALTER TABLE login_challenges ADD COLUMN purpose TEXT NOT NULL DEFAULT 'login'`,
+  ],
 ];
 
 let migrated = false;
