@@ -294,31 +294,91 @@ function eventForm({ caseId, existing, cases, lawyerId } = {}, after) {
 
 // ---------- layout ----------
 
-const NAV = [
-  { href: '#/', label: 'לוח בקרה', match: /^#\/?$/ },
-  { href: '#/clients', label: 'לקוחות ולידים', match: /^#\/clients/ },
-  { href: '#/cases', label: 'תיקים', match: /^#\/cases/ },
-  { href: '#/calendar', label: 'יומן ומועדים', match: /^#\/calendar/ },
-  { href: '#/tasks', label: 'משימות', match: /^#\/tasks/ },
-];
-const SOON = ['מסמכים', 'מיילים', 'שעות וחיוב'];
+const NAV_ICONS = {
+  home: ['M3 11l9-7 9 7', 'M5 10v10h5v-6h4v6h5V10'],
+  clients: ['M16 19v-1a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v1', 'M9 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8z', 'M22 19v-1a4 4 0 0 0-3-3.9', 'M16 3.1a4 4 0 0 1 0 7.8'],
+  cases: ['M3 7h18v13H3z', 'M8 7V4h8v3', 'M3 12h18'],
+  calendar: ['M4 5h16v16H4z', 'M4 10h16', 'M9 3v4', 'M15 3v4'],
+  tasks: ['M9 11l3 3 8-8', 'M20 12v7a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h9'],
+  docs: ['M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z', 'M14 3v5h5'],
+  mail: ['M3 6h18v12H3z', 'M3 7l9 6 9-6'],
+  billing: ['M12 21a9 9 0 1 0 0-18 9 9 0 0 0 0 18z', 'M12 7v5l3 2'],
+  audit: ['M8 6h13', 'M8 12h13', 'M8 18h13', 'M3 6h.01', 'M3 12h.01', 'M3 18h.01'],
+  system: ['M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6z', 'M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z'],
+  password: ['M5 11h14v10H5z', 'M8 11V7a4 4 0 0 1 8 0v4'],
+  logout: ['M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4', 'M16 17l5-5-5-5', 'M21 12H9'],
+  menu: ['M4 7h16', 'M4 12h16', 'M4 17h16'],
+  close: ['M6 6l12 12', 'M18 6L6 18'],
+  chevron: ['M15 6l-6 6 6 6'],
+};
+
+function navGroups() {
+  const groups = [
+    [
+      { href: '#/', label: 'לוח בקרה', icon: 'home', tone: 'navy', match: /^#\/?$/ },
+      { href: '#/clients', label: 'לקוחות ולידים', icon: 'clients', tone: 'blue', match: /^#\/clients/ },
+      { href: '#/cases', label: 'תיקים', icon: 'cases', tone: 'gold', match: /^#\/cases/ },
+      { href: '#/calendar', label: 'יומן ומועדים', icon: 'calendar', tone: 'red', match: /^#\/calendar/ },
+      { href: '#/tasks', label: 'משימות', icon: 'tasks', tone: 'green', match: /^#\/tasks/ },
+    ],
+    [
+      { label: 'מסמכים', icon: 'docs', tone: 'gray', soon: true },
+      { label: 'מיילים', icon: 'mail', tone: 'gray', soon: true },
+      { label: 'שעות וחיוב', icon: 'billing', tone: 'gray', soon: true },
+    ],
+  ];
+  const admin = [];
+  if (can('audit.view')) admin.push({ href: '#/audit', label: 'יומן פעולות', icon: 'audit', tone: 'slate', match: /^#\/audit/ });
+  if (can('users.manage')) admin.push({ href: '#/users', label: 'ניהול מערכת (IT)', icon: 'system', tone: 'slate', match: /^#\/users/ });
+  if (admin.length) groups.push(admin);
+  return groups;
+}
+
+function navItem(n, hash) {
+  const inner = [h('span', { class: 'nav-icon tone-' + n.tone, 'aria-hidden': 'true' }, icon(NAV_ICONS[n.icon], 17)), h('span', { class: 'nav-label' }, n.label)];
+  if (n.soon) return h('span', { class: 'nav-item disabled' }, inner, h('span', { class: 'soon' }, 'בקרוב'));
+  const active = n.match.test(hash);
+  return h('a', { href: n.href, class: 'nav-item' + (active ? ' active' : ''), 'aria-current': active ? 'page' : null, onClick: closeDrawer },
+    inner, h('span', { class: 'nav-chevron', 'aria-hidden': 'true' }, icon(NAV_ICONS.chevron, 16)));
+}
+
+function openDrawer() {
+  document.body.classList.add('drawer-open');
+  const first = document.querySelector('.side .nav-item');
+  if (first) setTimeout(() => first.focus(), 250);
+}
+function closeDrawer() { document.body.classList.remove('drawer-open'); }
+document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeDrawer(); });
+
+const PAGE_TITLES = [[/^#\/?$/, 'לוח בקרה'], [/^#\/clients/, 'לקוחות ולידים'], [/^#\/cases/, 'תיקים'], [/^#\/calendar/, 'יומן ומועדים'],
+  [/^#\/tasks/, 'משימות'], [/^#\/audit/, 'יומן פעולות'], [/^#\/users/, 'ניהול מערכת'], [/^#\/account/, 'החשבון שלי']];
 
 function layout(...content) {
   const hash = location.hash || '#/';
+  const title = (PAGE_TITLES.find(([re]) => re.test(hash)) || [null, ''])[1];
   const nav = h('nav', { class: 'nav', 'aria-label': 'תפריט ראשי' },
-    NAV.map((n) => h('a', { href: n.href, class: n.match.test(hash) ? 'active' : '', 'aria-current': n.match.test(hash) ? 'page' : null }, n.label)),
-    SOON.map((s) => h('span', { class: 'disabled' }, s, h('span', { class: 'soon' }, 'בקרוב'))),
-    can('audit.view') ? h('a', { href: '#/audit', class: /^#\/audit/.test(hash) ? 'active' : '' }, 'יומן פעולות') : null,
-    can('users.manage') ? h('a', { href: '#/users', class: /^#\/users/.test(hash) ? 'active' : '' }, 'ניהול מערכת (IT)') : null,
-  );
+    navGroups().map((g) => h('div', { class: 'nav-group' }, g.map((n) => navItem(n, hash)))));
   return h('div', { class: 'shell' },
-    h('aside', { class: 'side' },
-      h('div', { class: 'brand' }, h('img', { src: '/logo.png', alt: 'ML' }), h('div', {}, h('div', { class: 'name' }, 'משרד עו"ד מיכאל ליטווק')), h('div', { class: 'rule' })),
+    h('header', { class: 'topbar' },
+      h('button', { class: 'topbar-btn', type: 'button', 'aria-label': 'פתיחת התפריט', onClick: openDrawer }, icon(NAV_ICONS.menu, 22)),
+      h('div', { class: 'topbar-title' }, title),
+      h('a', { class: 'topbar-logo', href: '#/', 'aria-label': 'לוח בקרה' }, h('img', { src: '/logo.png', alt: '' }))),
+    h('div', { class: 'scrim', 'aria-hidden': 'true', onClick: closeDrawer }),
+    h('aside', { class: 'side', id: 'drawer', 'aria-label': 'תפריט' },
+      h('div', { class: 'drawer-head' },
+        h('button', { class: 'topbar-btn drawer-close', type: 'button', 'aria-label': 'סגירת התפריט', onClick: closeDrawer }, icon(NAV_ICONS.close, 20))),
+      h('div', { class: 'brand' }, h('img', { src: '/logo.png', alt: 'ML' }), h('div', { class: 'name' }, 'משרד עו"ד מיכאל ליטווק'), h('div', { class: 'rule' })),
       nav,
       h('div', { class: 'me' },
-        h('div', { class: 'avatar', 'aria-hidden': 'true' }, initials(me.name)),
-        h('div', { class: 'who' }, h('span', {}, me.name), h('small', {}, meta.roles[me.role] || ''),
-          h('div', { class: 'links' }, h('a', { href: '#/account' }, 'סיסמה'), h('button', { class: 'linkbtn', type: 'button', onClick: logout }, 'יציאה'))))),
+        h('div', { class: 'me-row' },
+          h('div', { class: 'avatar', 'aria-hidden': 'true' }, initials(me.name)),
+          h('div', { class: 'who' }, h('span', { class: 'who-name' }, me.name), h('small', {}, meta.roles[me.role] || ''))),
+        h('div', { class: 'nav-group me-actions' },
+          h('a', { class: 'nav-item', href: '#/account', onClick: closeDrawer },
+            h('span', { class: 'nav-icon tone-gray', 'aria-hidden': 'true' }, icon(NAV_ICONS.password, 17)), h('span', { class: 'nav-label' }, 'החלפת סיסמה'),
+            h('span', { class: 'nav-chevron', 'aria-hidden': 'true' }, icon(NAV_ICONS.chevron, 16))),
+          h('button', { class: 'nav-item danger', type: 'button', onClick: () => { closeDrawer(); logout(); } },
+            h('span', { class: 'nav-icon tone-red', 'aria-hidden': 'true' }, icon(NAV_ICONS.logout, 17)), h('span', { class: 'nav-label' }, 'יציאה'))))),
     h('main', { class: 'main', id: 'main' }, content));
 }
 
@@ -1025,6 +1085,7 @@ async function render() {
       : authPage(h('div', { class: 'form-error' }, e.message || 'שגיאה בטעינה'));
   }
   if (seq !== renderSeq || !view) return;
+  closeDrawer();
   const keepScroll = window.scrollY;
   app.replaceChildren(view);
   if (renderSeq === seq && sameRoute(raw)) window.scrollTo(0, keepScroll); else window.scrollTo(0, 0);
