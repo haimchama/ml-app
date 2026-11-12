@@ -129,6 +129,14 @@ export const MIGRATIONS = [
     )`,
     `ALTER TABLE login_challenges ADD COLUMN purpose TEXT NOT NULL DEFAULT 'login'`,
   ],
+  // 3: log in with an English username instead of the e-mail address
+  [
+    `ALTER TABLE users ADD COLUMN username TEXT`,
+    `UPDATE users SET username = lower(substr(email, 1, instr(email, '@') - 1))`,
+    `UPDATE users SET username = username || id
+     WHERE EXISTS (SELECT 1 FROM users u2 WHERE u2.username = users.username AND u2.id < users.id)`,
+    `CREATE UNIQUE INDEX users_username ON users(username)`,
+  ],
 ];
 
 let migrated = false;

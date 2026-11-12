@@ -307,3 +307,15 @@ dialog::backdrop { background: rgba(15, 27, 61, 0.35); }
   dialog { position: fixed; inset: auto 0 0 0; margin: 0; width: 100%; max-width: 100%; max-height: 92vh; border-radius: 22px 22px 0 0; animation: sheet-up 0.38s cubic-bezier(0.32, 0.72, 0, 1); }
   .dialog-body { padding: 26px 20px calc(env(safe-area-inset-bottom) + 20px); max-height: 88vh; }
 }
+
+/* password field with show/hide eye */
+.pw-wrap { position: relative; display: flex; }
+.pw-wrap input { width: 100%; padding-left: 52px !important; }
+.eye-btn { position: absolute; left: 4px; top: 50%; transform: translateY(-50%); width: 44px; height: 40px; border: none; background: none; color: var(--muted); border-radius: 10px; display: inline-flex; align-items: center; justify-content: center; cursor: pointer; }
+.eye-btn:hover { color: var(--navy); background: var(--line-2); }
+.eye-btn[aria-pressed="true"] { color: var(--navy); }
+
+/* login screens keep the stacked logo on every screen size */
+.auth .brand { flex-direction: column; align-items: center; text-align: center; gap: 10px; }
+.auth .brand img { width: min(200px, 55vw); }
+.auth .brand .rule { display: block; }

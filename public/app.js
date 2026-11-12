@@ -39,6 +39,23 @@ const ICONS = {
   edit: ['M4 20h4L19 9l-4-4L4 16v4z'],
 };
 
+const EYE = ['M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7S2 12 2 12z', 'M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6z'];
+const EYE_OFF = ['M3 3l18 18', 'M10.6 10.6a2 2 0 0 0 2.8 2.8', 'M9.9 5.2A10.4 10.4 0 0 1 12 5c6.4 0 10 7 10 7a17.7 17.7 0 0 1-3.2 4.2', 'M6.6 6.6C3.9 8.4 2 12 2 12s3.6 7 10 7a9.7 9.7 0 0 0 5.4-1.6'];
+
+// A password input with an eye button that shows or hides what was typed.
+function withEye(input) {
+  const btn = h('button', { type: 'button', class: 'eye-btn', 'aria-label': 'הצגת הסיסמה', 'aria-pressed': 'false', 'aria-controls': input.id || null }, icon(EYE, 20));
+  btn.addEventListener('click', () => {
+    const show = input.type === 'password';
+    input.type = show ? 'text' : 'password';
+    btn.setAttribute('aria-pressed', String(show));
+    btn.setAttribute('aria-label', show ? 'הסתרת הסיסמה' : 'הצגת הסיסמה');
+    btn.replaceChildren(icon(show ? EYE_OFF : EYE, 20));
+    input.focus();
+  });
+  return h('div', { class: 'pw-wrap' }, input, btn);
+}
+
 class ApiError extends Error { constructor(status, msg) { super(msg); this.status = status; } }
 
 async function api(path, { method = 'GET', body } = {}) {
@@ -136,7 +153,9 @@ function openForm({ title, fields, submit = 'שמירה', onSubmit }) {
         maxlength: f.max || 200, autocomplete: f.autocomplete || 'off', dir: f.dir, minlength: f.minlength });
     }
     inputs[f.name] = input;
-    return h('div', { class: 'field' + (f.full ? ' full' : '') }, h('label', { for: fid }, f.label + (f.required ? ' *' : '')), input);
+    if (f.type === 'username') { input.type = 'text'; input.setAttribute('autocapitalize', 'none'); input.setAttribute('spellcheck', 'false'); input.dir = 'ltr'; }
+    return h('div', { class: 'field' + (f.full ? ' full' : '') }, h('label', { for: fid }, f.label + (f.required ? ' *' : '')),
+      f.type === 'password' ? withEye(input) : input);
   });
   const dlg = h('dialog', {});
   const submitBtn = h('button', { class: 'btn primary', type: 'submit' }, submit);
@@ -848,9 +867,10 @@ async function viewUsers() {
     title: 'משתמש חדש',
     fields: [
       { name: 'name', label: 'שם', required: true, max: 80 },
-      { name: 'email', label: 'אימייל (אליו יישלחו קודי הכניסה)', type: 'email', required: true, dir: 'ltr' },
+      { name: 'username', label: 'שם משתמש באנגלית (לכניסה)', type: 'username', required: true, max: 30, autocomplete: 'off' },
+      { name: 'email', label: 'אימייל (לקודי אימות)', type: 'email', required: true, dir: 'ltr' },
       { name: 'role', label: 'תפקיד', type: 'select', value: 'secretary', options: roleOptions },
-      { name: 'password', label: 'סיסמה זמנית (10+ תווים, אותיות וספרות)', type: 'text', required: true, dir: 'ltr', minlength: 10 },
+      { name: 'password', label: 'סיסמה זמנית (10+ תווים, אותיות וספרות)', type: 'password', required: true, dir: 'ltr', minlength: 10, autocomplete: 'new-password' },
     ],
     onSubmit: async (v) => { await api('users', { method: 'POST', body: v }); toast('המשתמש נוסף. בכניסה הראשונה יתבקש להחליף סיסמה.'); await refresh(); },
   });
@@ -858,13 +878,14 @@ async function viewUsers() {
     title: 'עריכת משתמש – ' + u.name,
     fields: [
       { name: 'name', label: 'שם', required: true, value: u.name, max: 80 },
-      { name: 'email', label: 'אימייל (שם המשתמש, ולשם נשלחים הקודים)', type: 'email', required: true, value: u.email, dir: 'ltr' },
+      { name: 'username', label: 'שם משתמש באנגלית (לכניסה)', type: 'username', required: true, value: u.username, max: 30 },
+      { name: 'email', label: 'אימייל (לקודי אימות)', type: 'email', required: true, value: u.email, dir: 'ltr' },
       { name: 'role', label: 'תפקיד', type: 'select', value: u.role, options: roleOptions },
       { name: 'active', label: 'סטטוס', type: 'select', value: u.active ? '1' : '0', options: [{ value: '1', label: 'פעיל' }, { value: '0', label: 'מושבת' }] },
-      { name: 'password', label: 'סיסמה זמנית חדשה (ריק = ללא שינוי)', type: 'text', dir: 'ltr' },
+      { name: 'password', label: 'סיסמה זמנית חדשה (ריק = ללא שינוי)', type: 'password', dir: 'ltr', autocomplete: 'new-password' },
     ],
     onSubmit: async (v) => {
-      const body = { name: v.name, email: v.email, role: v.role, active: v.active === '1' };
+      const body = { name: v.name, username: v.username, email: v.email, role: v.role, active: v.active === '1' };
       if (v.password) body.password = v.password;
       await api('users/' + u.id, { method: 'PATCH', body });
       toast('נשמר');
@@ -880,9 +901,9 @@ async function viewUsers() {
   return layout(
     header({ title: 'ניהול מערכת', sub: 'משתמשים, הרשאות ומצב טכני', actions: [h('button', { class: 'btn primary', type: 'button', onClick: addUser }, '+ משתמש')] }),
     h('section', { class: 'card' }, h('h2', {}, 'משתמשים'), h('div', { class: 'table-wrap' }, h('table', {},
-      h('thead', {}, h('tr', {}, ['שם', 'אימייל', 'תפקיד', 'סטטוס', 'כניסה אחרונה', 'מחוברים', ''].map((t) => h('th', { scope: 'col' }, t)))),
+      h('thead', {}, h('tr', {}, ['שם', 'שם משתמש', 'אימייל', 'תפקיד', 'סטטוס', 'כניסה אחרונה', 'מחוברים', ''].map((t) => h('th', { scope: 'col' }, t)))),
       h('tbody', {}, users.map((u) => h('tr', {},
-        h('td', {}, u.name), h('td', { dir: 'ltr' }, u.email), h('td', {}, meta.roles[u.role] || u.role),
+        h('td', {}, u.name), h('td', { dir: 'ltr' }, u.username), h('td', { dir: 'ltr' }, u.email), h('td', {}, meta.roles[u.role] || u.role),
         h('td', {}, u.active ? (u.must_change ? h('span', { class: 'pill gold' }, 'ממתין להחלפת סיסמה') : h('span', { class: 'pill ok' }, 'פעיל')) : h('span', { class: 'pill muted' }, 'מושבת')),
         h('td', {}, u.last_login ? fmtDateTime(u.last_login) : '—'),
         h('td', {}, u.sessions),
@@ -906,7 +927,7 @@ async function viewUsers() {
       h('div', { class: 'narrow' },
         h('section', { class: 'card' }, h('h2', {}, 'ניסיונות כניסה כושלים (24 שעות)'),
           sys.loginFailures.length ? sys.loginFailures.map((f) => h('div', { class: 'list-item' },
-            h('div', { class: 'grow' }, h('span', { class: 'title', dir: 'ltr' }, f.email), h('span', { class: 'meta' }, 'אחרון: ' + fmtDateTime(f.last))),
+            h('div', { class: 'grow' }, h('span', { class: 'title', dir: 'ltr' }, f.username), h('span', { class: 'meta' }, 'אחרון: ' + fmtDateTime(f.last))),
             h('span', { class: 'pill ' + (f.n >= 5 ? 'danger' : 'gold') }, f.n))) : h('div', { class: 'empty' }, 'אין.')))),
   );
 }
@@ -922,9 +943,9 @@ function passwordForm(forced) {
     forced ? h('p', { class: 'sub', style: null }, 'לפני תחילת העבודה צריך להחליף את הסיסמה הזמנית.') : null,
     err,
     h('div', { class: 'fields' },
-      h('div', { class: 'field full' }, h('label', { for: 'cur' }, forced ? 'הסיסמה הזמנית' : 'סיסמה נוכחית'), cur),
-      h('div', { class: 'field' }, h('label', { for: 'p1' }, 'סיסמה חדשה (לפחות 10 תווים)'), p1),
-      h('div', { class: 'field' }, h('label', { for: 'p2' }, 'שוב, לאימות'), p2)),
+      h('div', { class: 'field full' }, h('label', { for: 'cur' }, forced ? 'הסיסמה הזמנית' : 'סיסמה נוכחית'), withEye(cur)),
+      h('div', { class: 'field' }, h('label', { for: 'p1' }, 'סיסמה חדשה (10+ תווים, אותיות וספרות)'), withEye(p1)),
+      h('div', { class: 'field' }, h('label', { for: 'p2' }, 'שוב, לאימות'), withEye(p2))),
     h('div', { class: 'form-actions' }, btn));
   form.addEventListener('submit', async (e) => {
     e.preventDefault();
@@ -942,7 +963,7 @@ function passwordForm(forced) {
 }
 
 function viewAccount() {
-  return layout(header({ title: 'החשבון שלי', sub: me.email }), h('div', { style: null }, passwordForm(false)));
+  return layout(header({ title: 'החשבון שלי', sub: `שם משתמש: ${me.username} · ${me.email}` }), h('div', { style: null }, passwordForm(false)));
 }
 
 function authPage(...content) {
@@ -957,9 +978,11 @@ function authForm({ title, fields, submit, onSubmit, hint }) {
   const btn = h('button', { class: 'btn primary', type: 'submit' }, submit);
   const form = h('form', { class: 'card' }, h('h2', {}, title), err,
     h('div', { class: 'fields' }, fields.map((f) => {
-      const el = h('input', { id: 'a_' + f.name, name: f.name, type: f.type || 'text', required: true, autocomplete: f.autocomplete, dir: f.dir, minlength: f.minlength });
+      const isUser = f.type === 'username';
+      const el = h('input', { id: 'a_' + f.name, name: f.name, type: isUser ? 'text' : (f.type || 'text'), required: true, autocomplete: f.autocomplete,
+        dir: isUser ? 'ltr' : f.dir, minlength: f.minlength, autocapitalize: isUser ? 'none' : null, spellcheck: isUser ? 'false' : null });
       inputs[f.name] = el;
-      return h('div', { class: 'field' }, h('label', { for: 'a_' + f.name }, f.label), el);
+      return h('div', { class: 'field' }, h('label', { for: 'a_' + f.name }, f.label), f.type === 'password' ? withEye(el) : el);
     })),
     h('div', { class: 'form-actions' }, btn));
   form.addEventListener('submit', async (e) => {
@@ -980,7 +1003,7 @@ async function viewLogin() {
     title: 'כניסה למערכת',
     submit: 'המשך',
     fields: [
-      { name: 'email', label: 'אימייל', type: 'email', autocomplete: 'username', dir: 'ltr' },
+      { name: 'username', label: 'שם משתמש', type: 'username', autocomplete: 'username' },
       { name: 'password', label: 'סיסמה', type: 'password', autocomplete: 'current-password' },
     ],
     hint: 'אם האימות הדו-שלבי פעיל, אחרי הסיסמה יישלח קוד לאימייל שלך. שכחת סיסמה? מנהל המערכת (IT) יגדיר לך סיסמה זמנית.',
@@ -1036,7 +1059,8 @@ async function viewSetup() {
     fields: [
       { name: 'token', label: 'קוד הקמה (מ-TKB)', type: 'password', autocomplete: 'off', dir: 'ltr' },
       { name: 'name', label: 'שם מלא', autocomplete: 'name' },
-      { name: 'email', label: 'אימייל (לקודי הכניסה)', type: 'email', autocomplete: 'username', dir: 'ltr' },
+      { name: 'username', label: 'שם משתמש באנגלית', type: 'username', autocomplete: 'username' },
+      { name: 'email', label: 'אימייל (לקודי אימות)', type: 'email', autocomplete: 'email', dir: 'ltr' },
       { name: 'password', label: 'סיסמה (10+ תווים, אותיות וספרות)', type: 'password', autocomplete: 'new-password', minlength: 10 },
     ],
     hint: s.configured ? 'המשתמש הראשון הוא משתמש IT עם כל ההרשאות. אחריו מוסיפים את שאר הצוות מתוך "ניהול מערכת".' : 'קוד ההקמה עוד לא הוגדר בשרת.',

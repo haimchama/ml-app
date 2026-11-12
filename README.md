@@ -38,7 +38,7 @@ npm test
 
 1. D1 בשם `ml` (ה-`database_id` כבר ב-`wrangler.jsonc`).
 2. לחבר את הריפו ל-Workers Builds כ-Worker בשם `ml-app`: production branch `release`, build `npm ci && npm test`, deploy `npx wrangler deploy`.
-3. אין צורך בסוד: בהפעלה הראשונה נוצר לבד משתמש IT ‏(`it@ml.tkb-pro.com`, עם סיסמה זמנית שנמסרה בנפרד) שחייב להחליף סיסמה בכניסה הראשונה. מומלץ לשנות לו מיד גם את האימייל לכתובת אמיתית.
+3. אין צורך בסוד: בהפעלה הראשונה נוצר לבד משתמש IT ‏(שם משתמש `it`, עם סיסמה זמנית שנמסרה בנפרד) שחייב להחליף סיסמה בכניסה הראשונה. מומלץ לשנות לו מיד גם את האימייל לכתובת אמיתית.
 4. הכתובת `ml.tkb-pro.com` מוגדרת ב-`wrangler.jsonc` כ-custom domain ונוצרת בפריסה הראשונה.
 5. **שליחת מיילים (נדרש לאימות הדו-שלבי):** ב-Cloudflare → Email Service → Email Sending, להוסיף את הדומיין `ml.tkb-pro.com` (או `npx wrangler email sending enable ml.tkb-pro.com`). זה מוסיף רשומות DNS רק לתת-הדומיין `ml`, לא ל-tkb-pro.com עצמו. הכתובת השולחת: `no-reply@ml.tkb-pro.com` (המשתנה `MAIL_FROM`).
    האימות הדו-שלבי מופעל מתוך המערכת (ניהול מערכת ← אימות דו-שלבי). ההפעלה שולחת קוד בדיקה ונכנסת לתוקף רק אחרי שמזינים אותו.

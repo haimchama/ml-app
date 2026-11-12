@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import {
   str, email, date, time, oneOf, id, checkPassword, hashPassword, verifyPassword,
   timingSafeEqual, addDays, todayIL, PROCESSES, LEAD_STAGES, ValidationError,
-  can, permsOf, initialApproval, randomCode, maskEmail, codeEmail, ROLES, PERMISSIONS,
+  username, can, permsOf, initialApproval, randomCode, maskEmail, codeEmail, ROLES, PERMISSIONS,
 } from '../src/lib.js';
 
 test('str trims, enforces required and max length', () => {
@@ -107,4 +107,14 @@ test('one-time codes and masked e-mail', () => {
   const m = codeEmail('<script>', '123456', 10);
   assert.ok(m.html.includes('123456') && !m.html.includes('<script>'));
   assert.ok(m.text.includes('123456'));
+});
+
+test('usernames are English, lower-cased and limited', () => {
+  assert.equal(username(' Michael.L '), 'michael.l');
+  assert.equal(username('ronit_2'), 'ronit_2');
+  assert.throws(() => username('דנה'), ValidationError);
+  assert.throws(() => username('ab'), ValidationError);
+  assert.throws(() => username('1abc'), ValidationError);
+  assert.throws(() => username('a b c'), ValidationError);
+  assert.throws(() => username(''), ValidationError);
 });

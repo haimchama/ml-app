@@ -150,6 +150,16 @@ export function email(value, name = 'אימייל', { required = false } = {}) {
   return v;
 }
 
+// Login name: English letters, digits and . _ - ; starts with a letter; stored lower-case.
+export function username(value, name = 'שם משתמש', { required = true } = {}) {
+  const v = str(value, name, { max: 30, required }).toLowerCase();
+  if (!v && !required) return '';
+  if (!/^[a-z][a-z0-9._-]{2,29}$/.test(v)) {
+    throw new ValidationError(`${name}: 3–30 תווים באנגלית (אותיות, ספרות, נקודה, מקף או קו תחתון), שמתחיל באות`);
+  }
+  return v;
+}
+
 export function date(value, name, { required = false } = {}) {
   const v = str(value, name, { max: 10, required });
   if (!v) return null;

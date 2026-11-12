@@ -2,7 +2,7 @@ import { migrate, MIGRATIONS } from './db.js';
 import {
   ValidationError, ROLES, PERMISSIONS, APPROVAL, LEAD_STAGES, EVENT_KINDS, PROCESSES,
   can, permsOf, initialApproval,
-  str, email, date, time, oneOf, id, bool, checkPassword,
+  str, email, username, date, time, oneOf, id, bool, checkPassword,
   hashPassword, verifyPassword, randomToken, randomCode, sha256, timingSafeEqual,
   maskEmail, codeEmail, addDays, todayIL,
 } from './lib.js';
@@ -20,6 +20,7 @@ const DEFAULT_MAIL_FROM = 'no-reply@ml.tkb-pro.com';
 
 // First IT user, created automatically on an empty database. Must change the password at first login.
 const BOOTSTRAP_IT = {
+  username: 'it',
   email: 'it@ml.tkb-pro.com',
   name: 'IT',
   pass: 'pbkdf2$30000$oOFag0R68x1M4Vsx+v54HQ==$Dt8FjJZ5rVlRE0btcKqO0G7G5OJ46nIgBcebEpnz2Vg=',
@@ -67,8 +68,8 @@ async function ensureBootstrapUser(env) {
   if (bootstrapped) return;
   const row = await env.DB.prepare('SELECT COUNT(*) AS n FROM users').first();
   if (row.n === 0) {
-    await env.DB.prepare(`INSERT OR IGNORE INTO users (email, name, role, pass, must_change) VALUES (?, ?, 'it', ?, 1)`)
-      .bind(BOOTSTRAP_IT.email, BOOTSTRAP_IT.name, BOOTSTRAP_IT.pass).run();
+    await env.DB.prepare(`INSERT OR IGNORE INTO users (username, email, name, role, pass, must_change) VALUES (?, ?, ?, 'it', ?, 1)`)
+      .bind(BOOTSTRAP_IT.username, BOOTSTRAP_IT.email, BOOTSTRAP_IT.name, BOOTSTRAP_IT.pass).run();
   }
   bootstrapped = true;
 }
@@ -122,7 +123,7 @@ async function currentUser(request, env) {
   if (!token) return null;
   const hash = await sha256(token);
   return env.DB.prepare(
-    `SELECT u.id, u.email, u.name, u.role, u.must_change FROM sessions s JOIN users u ON u.id = s.user_id
+    `SELECT u.id, u.username, u.email, u.name, u.role, u.must_change FROM sessions s JOIN users u ON u.id = s.user_id
      WHERE s.token_hash = ? AND s.expires_at > datetime('now') AND u.active = 1`
   ).bind(hash).first();
 }
@@ -261,20 +262,22 @@ async function setup(request, env) {
   if (!env.SETUP_TOKEN) throw new HttpError(503, 'קוד ההקמה (SETUP_TOKEN) עוד לא הוגדר בשרת');
   if (!timingSafeEqual(String(data.token || ''), env.SETUP_TOKEN)) throw new HttpError(403, 'קוד הקמה שגוי');
   const name = str(data.name, 'שם', { required: true, max: 80 });
+  const login = username(data.username);
   const mail = email(data.email, 'אימייל', { required: true });
   const pass = await hashPassword(checkPassword(data.password));
-  const r = await env.DB.prepare(`INSERT INTO users (email, name, role, pass) VALUES (?, ?, 'it', ?)`)
-    .bind(mail, name, pass).run();
+  const r = await env.DB.prepare(`INSERT INTO users (username, email, name, role, pass) VALUES (?, ?, ?, 'it', ?)`)
+    .bind(login, mail, name, pass).run();
   const userId = r.meta.last_row_id;
   await audit(env, { id: userId }, 'setup', 'user', userId);
   // No session here: the first login goes through the e-mail code like every other.
   return json({ ok: true });
 }
 
-async function tooManyFailures(env, mail) {
+// login_failures.email holds the username that was tried (the column predates usernames).
+async function tooManyFailures(env, login) {
   const fails = await env.DB.prepare(
     `SELECT COUNT(*) AS n FROM login_failures WHERE email = ? AND at > datetime('now', ?)`
-  ).bind(mail, `-${LOGIN_WINDOW_MIN} minutes`).first();
+  ).bind(login, `-${LOGIN_WINDOW_MIN} minutes`).first();
   return fails.n >= LOGIN_MAX_FAILURES;
 }
 
@@ -285,15 +288,16 @@ function lockedError() {
 // Step 1: e-mail + password. On success a code goes to the user's e-mail; no session yet.
 async function login(request, env, url) {
   const data = await body(request);
-  const mail = email(data.email, 'אימייל', { required: true });
+  const login = str(data.username, 'שם משתמש', { required: true, max: 30 }).toLowerCase();
   const password = str(data.password, 'סיסמה', { required: true, max: 200 });
-  if (await tooManyFailures(env, mail)) throw lockedError();
-  const user = await env.DB.prepare('SELECT id, name, email, pass FROM users WHERE email = ? AND active = 1').bind(mail).first();
+  if (await tooManyFailures(env, login)) throw lockedError();
+  const user = await env.DB.prepare('SELECT id, name, username, email, pass FROM users WHERE username = ? AND active = 1').bind(login).first();
   const ok = user ? await verifyPassword(password, user.pass) : false;
   if (!ok) {
-    await env.DB.prepare('INSERT INTO login_failures (email) VALUES (?)').bind(mail).run();
-    throw new HttpError(401, 'אימייל או סיסמה שגויים');
+    await env.DB.prepare('INSERT INTO login_failures (email) VALUES (?)').bind(login).run();
+    throw new HttpError(401, 'שם משתמש או סיסמה שגויים');
   }
+  const mail = login;
   if (!(await twoFactorRequired(env))) {
     await env.DB.prepare('DELETE FROM login_failures WHERE email = ?').bind(mail).run();
     await audit(env, user, 'login', 'user', user.id, 'password only');
@@ -315,7 +319,7 @@ async function loadChallenge(env, challenge, purpose = 'login') {
   const token = str(challenge, 'אתגר', { required: true, max: 100 });
   const hash = await sha256(token);
   const ch = await env.DB.prepare(
-    `SELECT c.*, u.email, u.name FROM login_challenges c JOIN users u ON u.id = c.user_id
+    `SELECT c.*, u.email, u.username, u.name FROM login_challenges c JOIN users u ON u.id = c.user_id
      WHERE c.token_hash = ? AND c.expires_at > datetime('now') AND u.active = 1 AND c.purpose = ?`
   ).bind(hash, purpose).first();
   if (!ch) throw new HttpError(401, 'פג תוקף הקוד. התחברו מחדש.');
@@ -327,7 +331,7 @@ async function verifyCode(request, env) {
   const data = await body(request);
   const ch = await loadChallenge(env, data.challenge);
   const code = str(data.code, 'קוד', { required: true, max: 10 }).replace(/\s/g, '');
-  if (await tooManyFailures(env, ch.email)) throw lockedError();
+  if (await tooManyFailures(env, ch.username)) throw lockedError();
   if (ch.attempts >= CODE_MAX_ATTEMPTS) {
     await env.DB.prepare('DELETE FROM login_challenges WHERE token_hash = ?').bind(ch.token_hash).run();
     throw new HttpError(401, 'יותר מדי ניסיונות קוד. התחברו מחדש.');
@@ -336,13 +340,13 @@ async function verifyCode(request, env) {
   if (!ok) {
     await env.DB.batch([
       env.DB.prepare('UPDATE login_challenges SET attempts = attempts + 1 WHERE token_hash = ?').bind(ch.token_hash),
-      env.DB.prepare('INSERT INTO login_failures (email) VALUES (?)').bind(ch.email),
+      env.DB.prepare('INSERT INTO login_failures (email) VALUES (?)').bind(ch.username),
     ]);
     throw new HttpError(401, 'הקוד שגוי');
   }
   await env.DB.batch([
     env.DB.prepare('DELETE FROM login_challenges WHERE token_hash = ?').bind(ch.token_hash),
-    env.DB.prepare('DELETE FROM login_failures WHERE email = ?').bind(ch.email),
+    env.DB.prepare('DELETE FROM login_failures WHERE email = ?').bind(ch.username),
   ]);
   await audit(env, { id: ch.user_id }, 'login', 'user', ch.user_id);
   return json({ ok: true }, 200, { 'Set-Cookie': await startSession(env, ch.user_id) });
@@ -410,7 +414,7 @@ async function meta(env, user) {
 async function listUsers(env, user) {
   requirePerm(user, 'users.manage');
   const { results } = await env.DB.prepare(
-    `SELECT u.id, u.email, u.name, u.role, u.active, u.must_change, u.created_at,
+    `SELECT u.id, u.username, u.email, u.name, u.role, u.active, u.must_change, u.created_at,
             (SELECT MAX(at) FROM audit a WHERE a.user_id = u.id AND a.action = 'login') AS last_login,
             (SELECT COUNT(*) FROM sessions s WHERE s.user_id = u.id AND s.expires_at > datetime('now')) AS sessions
      FROM users u ORDER BY u.active DESC, u.name`
@@ -422,14 +426,15 @@ async function createUser(request, env, user) {
   requirePerm(user, 'users.manage');
   const data = await body(request);
   const name = str(data.name, 'שם', { required: true, max: 80 });
+  const login = username(data.username);
   const mail = email(data.email, 'אימייל', { required: true });
   const role = oneOf(data.role, 'תפקיד', Object.keys(ROLES));
   const pass = await hashPassword(checkPassword(data.password));
-  const exists = await env.DB.prepare('SELECT id FROM users WHERE email = ?').bind(mail).first();
-  if (exists) throw new ValidationError('כבר קיים משתמש עם האימייל הזה');
-  const r = await env.DB.prepare('INSERT INTO users (email, name, role, pass, must_change) VALUES (?, ?, ?, ?, 1)')
-    .bind(mail, name, role, pass).run();
-  await audit(env, user, 'create', 'user', r.meta.last_row_id, `${mail} ${role}`);
+  if (await env.DB.prepare('SELECT id FROM users WHERE username = ?').bind(login).first()) throw new ValidationError('שם המשתמש הזה כבר תפוס');
+  if (await env.DB.prepare('SELECT id FROM users WHERE email = ?').bind(mail).first()) throw new ValidationError('כבר קיים משתמש עם האימייל הזה');
+  const r = await env.DB.prepare('INSERT INTO users (username, email, name, role, pass, must_change) VALUES (?, ?, ?, ?, ?, 1)')
+    .bind(login, mail, name, role, pass).run();
+  await audit(env, user, 'create', 'user', r.meta.last_row_id, `${login} ${role}`);
   return json({ id: r.meta.last_row_id });
 }
 
@@ -441,6 +446,12 @@ async function updateUser(request, env, user, userId) {
   const sets = [];
   const vals = [];
   if (data.name !== undefined) { sets.push('name = ?'); vals.push(str(data.name, 'שם', { required: true, max: 80 })); }
+  if (data.username !== undefined) {
+    const login = username(data.username);
+    const other = await env.DB.prepare('SELECT id FROM users WHERE username = ? AND id != ?').bind(login, userId).first();
+    if (other) throw new ValidationError('שם המשתמש הזה כבר תפוס');
+    sets.push('username = ?'); vals.push(login);
+  }
   if (data.email !== undefined) {
     const mail = email(data.email, 'אימייל', { required: true });
     const other = await env.DB.prepare('SELECT id FROM users WHERE email = ? AND id != ?').bind(mail, userId).first();
@@ -935,7 +946,7 @@ async function systemStatus(env, user) {
               (SELECT COUNT(*) FROM events) AS events`
     ),
     env.DB.prepare(
-      `SELECT email, COUNT(*) AS n, MAX(at) AS last FROM login_failures WHERE at > datetime('now', '-1 day') GROUP BY email ORDER BY n DESC LIMIT 20`
+      `SELECT email AS username, COUNT(*) AS n, MAX(at) AS last FROM login_failures WHERE at > datetime('now', '-1 day') GROUP BY email ORDER BY n DESC LIMIT 20`
     ),
   ]);
   return json({
